@@ -44,6 +44,8 @@ from performance.tracker import PerformanceTracker
 from news.alpaca_news import AlpacaNewsFeed
 from news.earnings import EarningsCalendar, IPOCalendar
 from news.sentiment import score_articles, score_text
+from news.macro_feeds import MacroFeedAggregator
+from news.macro_analysis import assess as assess_macro, MacroRisk
 
 ET = pytz.timezone('America/New_York')
 log = logging.getLogger('bot')
@@ -82,6 +84,8 @@ class TradingBot:
         self.news = AlpacaNewsFeed()
         self.earnings = EarningsCalendar()
         self.ipos = IPOCalendar()
+        self.macro_feeds = MacroFeedAggregator()
+        self.macro_risk: MacroRisk = MacroRisk()
 
         self._traded_today: Set[str] = set()
         self._running = False
@@ -90,6 +94,7 @@ class TradingBot:
         self._live_prices: Dict[str, float] = {}
         self._live_vwap: Dict[str, float] = {}
         self._last_news_fetch: Optional[datetime] = None
+        self._last_macro_fetch: Optional[datetime] = None
         self._sentiment_cache: Dict[str, dict] = {}
 
     # ── Market data streaming ─────────────────────────────────────────────────
@@ -151,6 +156,34 @@ class TradingBot:
             arts = self.news.for_symbol(sym)
             self._sentiment_cache[sym] = score_articles(arts)
         self._last_news_fetch = now_utc
+
+    def _refresh_macro_if_due(self):
+        """Refresh Fed / WH / Treasury feeds and reassess macro risk."""
+        now_utc = datetime.now(timezone.utc)
+        if (self._last_macro_fetch and
+                (now_utc - self._last_macro_fetch).total_seconds() < config.MACRO_FETCH_INTERVAL_MIN * 60):
+            return
+
+        self.macro_feeds.fetch_all(lookback_hours=config.MACRO_LOOKBACK_HOURS)
+        self.macro_risk = assess_macro(self.macro_feeds)
+        self._apply_macro_risk()
+        self._last_macro_fetch = now_utc
+
+        log.info(
+            f'Macro: fed={self.macro_risk.fed_bias} ({self.macro_risk.fed_score:+.2f})  '
+            f'tariff={self.macro_risk.tariff_risk}  geo={self.macro_risk.geopolitical_risk}  '
+            f'FOMC={self.macro_risk.next_fomc_days}d  risk={self.macro_risk.risk_level}'
+        )
+
+    def _apply_macro_risk(self):
+        """Translate MacroRisk into risk-manager state."""
+        self.risk.macro_risk_multiplier = self.macro_risk.risk_multiplier
+        halt = ''
+        if config.HALT_ON_FOMC_DAY and self.macro_risk.fomc_today:
+            halt = 'FOMC announcement today'
+        elif config.HALT_ON_GEOPOLITICAL and self.macro_risk.geopolitical_risk:
+            halt = 'major geopolitical event'
+        self.risk.macro_halt_reason = halt
 
     def _news_filter(self, symbol: str) -> tuple[bool, int, str]:
         """
@@ -244,15 +277,16 @@ class TradingBot:
                 break
 
             if phase == 'premarket':
-                # Pre-market: refresh earnings calendar + news ahead of open
                 self.earnings.refresh(self.watchlist)
                 self._refresh_news_if_due()
+                self._refresh_macro_if_due()
                 await asyncio.sleep(30)
                 continue
 
             if phase == 'orb_capture':
                 self._capture_orb()
                 self._refresh_news_if_due()
+                self._refresh_macro_if_due()
                 await asyncio.sleep(60)
                 continue
 
@@ -276,6 +310,7 @@ class TradingBot:
 
             self._update_account()
             self._refresh_news_if_due()
+            self._refresh_macro_if_due()
             self.orders.check_exits(self._live_prices)
 
             # Scan watchlist for setups
@@ -520,6 +555,8 @@ class TradingBot:
             'news':            news_articles,
             'earnings':        earnings_upcoming,
             'sentiment':       self._sentiment_cache,
+            'macro_news':      self.macro_feeds.all(limit=20),
+            'macro_risk':      self.macro_risk.to_dict(),
         }
 
         js = f'window.DASHBOARD_DATA = {json.dumps(data, indent=2)};\n'

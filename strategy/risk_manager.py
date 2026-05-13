@@ -30,6 +30,8 @@ class RiskManager:
         self.account_size = account_size
         self.daily_pnl: float = 0.0
         self.open_positions: int = 0
+        self.macro_risk_multiplier: float = 1.0   # set by macro analysis
+        self.macro_halt_reason: str = ''           # non-empty halts all trades
 
     def update_account(self, equity: float):
         self.account_size = equity
@@ -46,9 +48,15 @@ class RiskManager:
 
     @property
     def max_risk_dollars(self) -> float:
-        return self.account_size * config.MAX_RISK_PER_TRADE_PCT
+        """Base risk × macro multiplier (smaller on FOMC days, tariff news, etc.)."""
+        base = self.account_size * config.MAX_RISK_PER_TRADE_PCT
+        if config.REDUCE_SIZE_ON_HIGH_RISK:
+            return base * self.macro_risk_multiplier
+        return base
 
     def is_trading_allowed(self) -> tuple[bool, str]:
+        if self.macro_halt_reason:
+            return False, f'Macro halt: {self.macro_halt_reason}'
         if self.daily_pnl <= -self.daily_loss_limit:
             return False, f'Daily loss limit hit ({self.daily_pnl:.2f})'
         if self.open_positions >= config.MAX_CONCURRENT_POSITIONS:

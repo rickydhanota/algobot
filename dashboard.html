@@ -274,6 +274,52 @@
       font-size: 12px;
       font-style: italic;
     }
+
+    /* ── Macro Watch ──────────────────────────────────────────── */
+    #macro-banner {
+      margin: 16px 28px 0;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 10px;
+      padding: 14px 20px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 14px;
+    }
+    #macro-banner.risk-high { border-color: #f8514999; background: linear-gradient(90deg, #3a1a1a22, #161b22 30%); }
+    #macro-banner.risk-moderate { border-color: #e3b34177; }
+
+    .macro-stat { display: flex; flex-direction: column; gap: 3px; }
+    .macro-label { font-size: 10px; color: #6e7681; text-transform: uppercase; letter-spacing: 0.7px; }
+    .macro-value { font-size: 14px; font-weight: 700; }
+
+    .pill {
+      display: inline-block;
+      padding: 2px 9px;
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+    }
+    .pill.hawkish { background:#3a1a1a33; color:#f85149; border:1px solid #f8514955; }
+    .pill.dovish  { background:#1a3a2233; color:#3fb950; border:1px solid #2ea04355; }
+    .pill.neutral { background:#21262d;   color:#8b949e; border:1px solid #30363d; }
+    .pill.alert   { background:#3a1a1a;   color:#f85149; border:1px solid #f85149; animation: pulse 2s infinite; }
+    .pill.warn    { background:#3a3122;   color:#e3b341; border:1px solid #e3b34155; }
+    .pill.ok      { background:#1a3a2233; color:#3fb950; border:1px solid #2ea04355; }
+
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+    /* Macro news category badges */
+    .cat-fed       { background:#1f3a5f33; color:#58a6ff; border:1px solid #1f6feb55; }
+    .cat-president { background:#3d1f6033; color:#bc8cff; border:1px solid #8b5cf655; }
+    .cat-tariff    { background:#3a2f1a33; color:#e3b341; border:1px solid #e3b34155; }
+    .cat-treasury  { background:#1a3a2233; color:#3fb950; border:1px solid #2ea04355; }
+    .cat-general   { background:#21262d;   color:#8b949e; border:1px solid #30363d; }
+    .cat-tag {
+      padding: 1px 7px; border-radius: 3px; font-size: 10px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.4px;
+    }
   </style>
 </head>
 <body>
@@ -308,6 +354,34 @@
     <div class="card-label">Profit Factor</div>
     <div class="card-value purple" id="profit-factor">—</div>
     <div class="card-sub">wins ÷ losses gross</div>
+  </div>
+</div>
+
+<!-- ── Macro Risk Banner ────────────────────────────────────────────────── -->
+<div id="macro-banner">
+  <div class="macro-stat">
+    <span class="macro-label">Macro Risk</span>
+    <span class="macro-value"><span class="pill ok" id="macro-risk-pill">—</span></span>
+  </div>
+  <div class="macro-stat">
+    <span class="macro-label">Fed Bias</span>
+    <span class="macro-value"><span class="pill neutral" id="fed-bias-pill">—</span></span>
+  </div>
+  <div class="macro-stat">
+    <span class="macro-label">Next FOMC</span>
+    <span class="macro-value" id="next-fomc">—</span>
+  </div>
+  <div class="macro-stat">
+    <span class="macro-label">Tariff/Trade</span>
+    <span class="macro-value"><span class="pill ok" id="tariff-pill">none</span></span>
+  </div>
+  <div class="macro-stat">
+    <span class="macro-label">Geopolitical</span>
+    <span class="macro-value"><span class="pill ok" id="geo-pill">none</span></span>
+  </div>
+  <div class="macro-stat">
+    <span class="macro-label">Position Size</span>
+    <span class="macro-value" id="size-mult">100%</span>
   </div>
 </div>
 
@@ -348,6 +422,19 @@
         </div>
       </div>
       <canvas id="pnl-chart"></canvas>
+    </div>
+  </div>
+
+  <!-- Macro Watch: Fed + WH + Treasury feeds -->
+  <div>
+    <div class="section-header">
+      <span class="section-title">Macro Watch — Fed / White House / Treasury</span>
+      <span class="badge" id="macro-count">0</span>
+    </div>
+    <div class="news-panel">
+      <div class="news-list" id="macro-list" style="max-height: 320px;">
+        <div class="empty-mini">Waiting for macro feeds...</div>
+      </div>
     </div>
   </div>
 
@@ -657,6 +744,12 @@
     // Chart
     buildChart(data.historical_trades || [], currentRange);
 
+    // Macro risk banner
+    renderMacroBanner(data.macro_risk || {});
+
+    // Macro news (Fed/WH/Treasury)
+    renderMacroNews(data.macro_news || []);
+
     // News
     renderNews(data.news || []);
 
@@ -713,6 +806,94 @@
         </tr>`;
       }).join('');
     }
+  }
+
+  // ── Macro renderers ───────────────────────────────────────────────────────
+
+  function renderMacroBanner(m) {
+    const banner = document.getElementById('macro-banner');
+    const lvl = m.risk_level || 'low';
+    banner.className = '';
+    if (lvl === 'high')     banner.classList.add('risk-high');
+    if (lvl === 'moderate') banner.classList.add('risk-moderate');
+
+    const riskPill = document.getElementById('macro-risk-pill');
+    riskPill.className = 'pill ' + (lvl === 'high' ? 'alert' : (lvl === 'moderate' ? 'warn' : 'ok'));
+    riskPill.textContent = lvl.toUpperCase();
+
+    const fedPill = document.getElementById('fed-bias-pill');
+    const bias = (m.fed_bias || 'neutral').toLowerCase();
+    fedPill.className = 'pill ' + bias;
+    const fedScore = m.fed_score != null ? ` (${m.fed_score > 0 ? '+' : ''}${m.fed_score.toFixed(2)})` : '';
+    fedPill.textContent = bias.toUpperCase() + fedScore;
+
+    const fomcEl = document.getElementById('next-fomc');
+    if (m.fomc_today) {
+      fomcEl.innerHTML = '<span class="pill alert">TODAY</span>';
+    } else if (m.fomc_tomorrow) {
+      fomcEl.innerHTML = '<span class="pill warn">TOMORROW</span>';
+    } else if (m.next_fomc_days != null) {
+      const cls = m.next_fomc_days <= 7 ? 'warn' : 'neutral';
+      fomcEl.innerHTML = `<span class="pill ${cls}">${m.next_fomc_days} days</span>`;
+    } else {
+      fomcEl.textContent = '—';
+    }
+
+    const tariffPill = document.getElementById('tariff-pill');
+    if (m.tariff_risk) {
+      tariffPill.className = 'pill warn';
+      tariffPill.textContent = 'DETECTED';
+    } else {
+      tariffPill.className = 'pill ok';
+      tariffPill.textContent = 'none';
+    }
+
+    const geoPill = document.getElementById('geo-pill');
+    if (m.geopolitical_risk) {
+      geoPill.className = 'pill alert';
+      geoPill.textContent = 'DETECTED';
+    } else {
+      geoPill.className = 'pill ok';
+      geoPill.textContent = 'none';
+    }
+
+    const mult = (m.risk_multiplier != null ? m.risk_multiplier : 1.0) * 100;
+    const sizeEl = document.getElementById('size-mult');
+    sizeEl.textContent = `${mult.toFixed(0)}%`;
+    sizeEl.className = 'macro-value ' + (mult < 100 ? 'yellow' : 'green');
+  }
+
+  function renderMacroNews(articles) {
+    document.getElementById('macro-count').textContent = articles.length;
+    const list = document.getElementById('macro-list');
+    if (!articles.length) {
+      list.innerHTML = '<div class="empty-mini">No recent macro announcements</div>';
+      return;
+    }
+    const sourceLabel = {
+      fed_press:    'Fed Press',
+      fed_speeches: 'Fed Speech',
+      fed_monetary: 'FOMC',
+      whitehouse:   'White House',
+      treasury:     'Treasury',
+    };
+    list.innerHTML = articles.map(a => {
+      const cat = a.category || 'general';
+      const src = sourceLabel[a.source] || a.source;
+      const title = (a.title || '').replace(/</g, '&lt;');
+      const when = fmtRelativeTime(a.published);
+      return `
+        <div class="news-item">
+          <div class="news-content">
+            <a class="news-headline" href="${a.link}" target="_blank" rel="noopener">${title}</a>
+            <div class="news-meta">
+              <span class="cat-tag cat-${cat}">${cat}</span>
+              <span>${src}</span>
+              <span>${when}</span>
+            </div>
+          </div>
+        </div>`;
+    }).join('');
   }
 
   // ── News & earnings renderers ─────────────────────────────────────────────

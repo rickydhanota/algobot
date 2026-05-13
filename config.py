@@ -54,6 +54,13 @@ NEWS_NEGATIVE_THRESHOLD = -0.30    # sentiment ≤ this rejects the trade
 NEWS_POSITIVE_BOOST = 0.30         # sentiment ≥ this adds bonus to signal score
 NEWS_SCORE_BONUS = 5               # points added/subtracted from signal score
 
+# ── Macro / Fed / White House monitoring ──────────────────────────────────────
+MACRO_FETCH_INTERVAL_MIN = 30      # how often to refresh macro feeds
+MACRO_LOOKBACK_HOURS = 48          # how far back to read Fed/WH articles
+HALT_ON_FOMC_DAY = True            # no new trades on FOMC announcement days
+HALT_ON_GEOPOLITICAL = True        # no new trades on major war/crisis news
+REDUCE_SIZE_ON_HIGH_RISK = True    # use macro risk multiplier for position size
+
 # ── Default watchlist ─────────────────────────────────────────────────────────
 WATCHLIST = [
     'SPY', 'QQQ', 'IWM',

@@ -10,3 +10,4 @@ ta>=0.11.0
 SQLAlchemy>=2.0.0
 pytz>=2024.1
 yfinance>=0.2.40
+feedparser>=6.0.10

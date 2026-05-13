@@ -41,9 +41,11 @@ TRIM_TIERS = [
     # remaining 0.01 = moon runner
 ]
 
-DYNAMIC_STOP_PCT = -0.15
-TAPE_OVERRIDE_MIN_CONF = 60
-TAPE_FLIP_THRESHOLD = 0.40       # opposite-direction imbalance triggers exit
+SOFT_STOP_PCT = -0.15           # "watch zone" — hold by default, exit only on negative evidence
+HARD_STOP_PCT = -0.40           # catastrophic backstop — always exit
+TAPE_FLIP_THRESHOLD = 0.40      # opposite-direction imbalance triggers exit
+TAPE_AGAINST_CONF_MIN = 40      # at soft stop, tape confluence ≥ this against us = exit
+TAPE_AGAINST_IMBALANCE_MIN = 0.30
 
 
 @dataclass
@@ -71,6 +73,7 @@ class ExitManager:
         self,
         live_prices: Dict[str, float],
         priority_tape: Optional['PriorityTapeReader'] = None,
+        volume_monitor=None,
     ) -> List[ExitDecision]:
         decisions: List[ExitDecision] = []
         for trade_id, trade in list(self.orders.active.items()):
@@ -91,8 +94,10 @@ class ExitManager:
                 decisions.append(decision)
                 continue
 
-            # 2. Dynamic stop with tape override
-            decision = self._maybe_dynamic_stop(trade, current, pnl_pct, priority_tape)
+            # 2. Dynamic stop with tape + volume confirmation
+            decision = self._maybe_dynamic_stop(
+                trade, current, pnl_pct, priority_tape, volume_monitor,
+            )
             if decision:
                 decisions.append(decision)
         return decisions
@@ -146,7 +151,18 @@ class ExitManager:
         current: float,
         pnl_pct: float,
         priority_tape,
+        volume_monitor=None,
     ) -> Optional[ExitDecision]:
+        """
+        Dynamic stop philosophy:
+          • At -15% (SOFT): trades dip — that's normal. HOLD by default.
+            ONLY exit on negative evidence: tape clearly turning against us,
+            OR volume drying up / stale tape (can't read the market).
+          • At any P&L: if tape FLIPS hard against us (sweep or imbalance
+            ≥ 0.40 opposite our direction with confluence ≥ 50) → exit.
+          • At -40% (HARD): catastrophic — exit no matter what to preserve
+            capital.
+        """
         underlying = self._underlying.get(trade.trade_id) or self._derive_underlying(trade.symbol)
         tape_sig = None
         if priority_tape and underlying:
@@ -155,38 +171,79 @@ class ExitManager:
             except Exception:
                 tape_sig = None
 
-        # 1. Hard flip check: tape goes strongly against us, exit regardless
+        vol_state = None
+        if volume_monitor and underlying:
+            try:
+                vol_state = volume_monitor.analyze(underlying)
+            except Exception:
+                vol_state = None
+
+        our_dir = 'buy' if trade.option_type == 'call' else 'sell'
+        opp_dir = 'sell' if our_dir == 'buy' else 'buy'
+
+        # ── 1. Hard backstop FIRST: catastrophic loss → always exit ──────────
+        if pnl_pct <= HARD_STOP_PCT:
+            self.orders._close_trade(trade, current, 'hard_stop_40pct')
+            return ExitDecision(
+                trade_id=trade.trade_id, action='stop', quantity=trade.contracts or 0,
+                reason=f'hard stop {pnl_pct*100:.1f}% (catastrophic)',
+                pnl_pct=pnl_pct,
+            )
+
+        # ── 2. Tape FLIP (any P&L): clear reversal → exit ────────────────────
         if tape_sig:
-            our_dir = 'buy' if trade.option_type == 'call' else 'sell'
-            opp_dir = 'sell' if our_dir == 'buy' else 'buy'
             if (tape_sig.direction == opp_dir and
                     abs(tape_sig.imbalance_100) >= TAPE_FLIP_THRESHOLD and
                     tape_sig.confluence_score >= 50):
                 self.orders._close_trade(trade, current, 'tape_flip')
                 return ExitDecision(
                     trade_id=trade.trade_id, action='stop', quantity=trade.contracts or 0,
-                    reason=f'tape flipped {opp_dir} (imb {tape_sig.imbalance_100:+.2f})',
+                    reason=f'tape flipped {opp_dir} (imb {tape_sig.imbalance_100:+.2f}, conf {tape_sig.confluence_score})',
                     pnl_pct=pnl_pct,
                 )
 
-        # 2. Stop loss check
-        if pnl_pct > DYNAMIC_STOP_PCT:
-            return None  # not in stop zone yet
+        # ── 3. Above soft stop → no action ───────────────────────────────────
+        if pnl_pct > SOFT_STOP_PCT:
+            return None
 
-        # 3. Tape override: hold past stop if tape supports our direction
+        # ── 4. At/below soft stop: hold by default, exit on NEGATIVE evidence
+
+        # 4a. Tape clearly against us → exit
         if tape_sig:
-            our_dir = 'buy' if trade.option_type == 'call' else 'sell'
-            if (tape_sig.direction == our_dir and
-                    tape_sig.confluence_score >= TAPE_OVERRIDE_MIN_CONF):
-                # Hold — log occasionally
-                log.info(
-                    f'[{trade.symbol}] At {pnl_pct*100:+.1f}% but tape supports '
-                    f'(conf {tape_sig.confluence_score}, imb {tape_sig.imbalance_100:+.2f}) — holding'
+            if (tape_sig.direction == opp_dir and
+                    tape_sig.confluence_score >= TAPE_AGAINST_CONF_MIN and
+                    abs(tape_sig.imbalance_100) >= TAPE_AGAINST_IMBALANCE_MIN):
+                self.orders._close_trade(trade, current, 'soft_stop_tape_against')
+                return ExitDecision(
+                    trade_id=trade.trade_id, action='stop', quantity=trade.contracts or 0,
+                    reason=f'tape against us at {pnl_pct*100:.1f}% (imb {tape_sig.imbalance_100:+.2f})',
+                    pnl_pct=pnl_pct,
                 )
-                return None
 
-        # 4. No support → exit
-        self.orders._close_trade(trade, current, 'dynamic_stop')
+        # 4b. Volume gone (stale or unhealthy) → can't read → exit
+        if vol_state and (vol_state.is_stale or not vol_state.is_healthy):
+            self.orders._close_trade(trade, current, 'soft_stop_no_volume')
+            return ExitDecision(
+                trade_id=trade.trade_id, action='stop', quantity=trade.contracts or 0,
+                reason=f'volume unhealthy at {pnl_pct*100:.1f}% ({vol_state.health_label})',
+                pnl_pct=pnl_pct,
+            )
+
+        # 4c. Default: HOLD — log once per minute so we know it's intentional
+        last_log_key = f'_hold_log_{trade.trade_id}'
+        import time
+        now_ts = int(time.time())
+        last = getattr(self, last_log_key, 0)
+        if now_ts - last > 60:
+            tape_info = (
+                f'tape={tape_sig.direction}/conf={tape_sig.confluence_score}'
+                if tape_sig else 'no tape'
+            )
+            log.info(
+                f'[{trade.symbol}] {pnl_pct*100:+.1f}% — HOLDING (no negative evidence; {tape_info})'
+            )
+            setattr(self, last_log_key, now_ts)
+        return None
         return ExitDecision(
             trade_id=trade.trade_id, action='stop', quantity=trade.contracts or 0,
             reason=f'-15% stop, tape not supporting',

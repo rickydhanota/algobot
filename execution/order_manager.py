@@ -269,19 +269,97 @@ class OrderManager:
         # Bank the partial P&L day-level
         self.risk.record_daily_pnl(partial_pnl)
 
-    def close_by_id(self, trade_id: str, live_prices: dict = None, reason: str = 'manual') -> tuple[bool, str]:
-        """Close a single open position by trade_id. Returns (ok, message)."""
+    def close_by_id(
+        self,
+        trade_id: str,
+        qty: Optional[int] = None,
+        live_prices: dict = None,
+        reason: str = 'manual',
+    ) -> tuple[bool, str]:
+        """
+        Close (partially or fully) an open position by trade_id.
+
+          qty=None or qty >= available → full close
+          qty < available              → partial close
+          For options, qty is CONTRACTS. For stocks, qty is SHARES.
+        """
         trade = self.active.get(trade_id)
         if trade is None:
             return False, f'trade {trade_id} not found'
         if trade.status != 'open':
             return False, f'trade {trade_id} is not open (status={trade.status})'
+
+        if trade.asset_type == 'option':
+            available = trade.contracts or 0
+            unit = 'contracts'
+        else:
+            available = trade.shares or 0
+            unit = 'shares'
+
+        if available <= 0:
+            return False, 'no quantity available'
+
         price = (live_prices or {}).get(trade.symbol) or trade.entry_price
+
+        # Full close (qty omitted or >= available)
+        if qty is None or qty >= available:
+            try:
+                self._close_trade(trade, price, reason)
+                return True, f'closed {available} {unit} of {trade.symbol} @ {price:.2f}'
+            except Exception as e:
+                return False, f'close failed: {e}'
+
+        # Partial close
+        if qty <= 0:
+            return False, f'invalid quantity {qty}'
+
         try:
-            self._close_trade(trade, price, reason)
-            return True, f'closed {trade.symbol} @ {price:.2f}'
+            if trade.asset_type == 'option':
+                self._partial_close_option(trade, qty, f'manual_partial_{reason}')
+            else:
+                self._partial_close_stock(trade, qty, price, f'manual_partial_{reason}')
+            remaining = trade.contracts if trade.asset_type == 'option' else trade.shares
+            return True, f'partial close: {qty}/{available} {unit} of {trade.symbol}; {remaining} remaining'
         except Exception as e:
-            return False, f'close failed: {e}'
+            return False, f'partial close failed: {e}'
+
+    def _partial_close_stock(self, trade: ActiveTrade, qty: int, price: float, reason: str):
+        """Sell `qty` shares of an open stock position (or buy-to-cover for shorts)."""
+        if trade.asset_type != 'stock':
+            return
+        qty = min(qty, trade.shares)
+        if qty <= 0:
+            return
+        # Close direction is opposite of open
+        side = OrderSide.SELL if trade.direction in ('long', 'buy') else OrderSide.BUY
+        try:
+            req = MarketOrderRequest(
+                symbol=trade.symbol,
+                qty=qty,
+                side=side,
+                time_in_force=TimeInForce.DAY,
+            )
+            self._client.submit_order(req)
+        except Exception as e:
+            log.error(f'[{trade.symbol}] Partial stock close failed: {e}')
+            raise
+
+        mult = 1 if trade.direction in ('long', 'buy') else -1
+        partial_pnl = (price - trade.entry_price) * qty * mult
+        trade.realized_partial_pnl += partial_pnl
+        trade.partial_exits.append({
+            'qty':       qty,
+            'price':     price,
+            'reason':    reason,
+            'pnl':       round(partial_pnl, 2),
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        })
+        trade.shares -= qty
+        log.info(
+            f'[{trade.symbol}] PARTIAL {qty}sh ({reason}) → '
+            f'{trade.shares} remaining; partial P&L ${partial_pnl:+.2f}'
+        )
+        self.risk.record_daily_pnl(partial_pnl)
 
     def close_all(self):
         """EOD: close all open positions."""

@@ -1021,8 +1021,10 @@
         const qtyDisplay = t.asset_type === 'option' && t.original_contracts && t.original_contracts !== t.contracts
           ? `${t.contracts}c <small style="color:#6e7681">/ ${t.original_contracts}c</small>`
           : qtyCell(t);
+        const totalQty = t.asset_type === 'option' ? (t.contracts || 0) : (t.shares || 0);
+        const unit = t.asset_type === 'option' ? 'c' : 'sh';
         const closeBtn = t.trade_id
-          ? `<button class="btn-close-row" onclick="closeOneTrade('${t.trade_id}', '${t.symbol}')">Close</button>`
+          ? `<button class="btn-close-row" onclick="closeOneTrade('${t.trade_id}', '${t.symbol}', ${totalQty}, '${unit}')">Close</button>`
           : '<span style="color:#6e7681">—</span>';
         return `<tr>
           <td class="ticker">${t.symbol}${partialBadge}</td>
@@ -1493,17 +1495,34 @@
     }
   }
 
-  async function closeOneTrade(tradeId, symbol) {
+  async function closeOneTrade(tradeId, symbol, totalQty, unit) {
     if (!HAS_SERVER) {
       alert('Open dashboard at http://localhost:8765 to close individual trades.');
       return;
     }
-    if (!confirm(`Close ${symbol} position now at market?`)) return;
+    const promptMsg =
+      `How many ${unit === 'c' ? 'contracts' : 'shares'} of ${symbol} to close?\n` +
+      `Available: ${totalQty}\n` +
+      `(Enter blank or ${totalQty} for full close, lower number for partial)`;
+    const input = prompt(promptMsg, String(totalQty));
+    if (input === null) return;     // user cancelled
+    const trimmed = input.trim();
+    let qty = trimmed === '' ? totalQty : parseInt(trimmed, 10);
+    if (isNaN(qty) || qty < 1) { alert('Invalid quantity'); return; }
+    qty = Math.min(qty, totalQty);
+
+    const isFull = qty >= totalQty;
+    const confirmMsg = isFull
+      ? `Fully close ${symbol} (${totalQty}${unit}) at market now?`
+      : `Partial close ${symbol}: ${qty}${unit} of ${totalQty}${unit} at market now?`;
+    if (!confirm(confirmMsg)) return;
+
     const btn = event.target;
     btn.disabled = true;
-    btn.textContent = 'Closing...';
+    btn.textContent = isFull ? 'Closing...' : 'Trimming...';
     try {
-      const r = await fetch(API_BASE + '/api/close/' + encodeURIComponent(tradeId), { method: 'POST' });
+      const url = `${API_BASE}/api/close/${encodeURIComponent(tradeId)}?qty=${qty}`;
+      const r = await fetch(url, { method: 'POST' });
       const j = await r.json();
       if (!j.ok) alert('Close failed: ' + (j.message || 'unknown'));
     } catch (e) {

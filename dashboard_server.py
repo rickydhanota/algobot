@@ -105,12 +105,26 @@ class DashboardServer:
 
     async def _close_one(self, request):
         trade_id = request.match_info['trade_id']
+        # qty may come via query string (?qty=3) or JSON body {"qty": 3}
+        qty = request.query.get('qty')
+        if qty is None and request.can_read_body:
+            try:
+                body = await request.json()
+                qty = body.get('qty')
+            except Exception:
+                pass
+        if qty is not None:
+            try:
+                qty = int(qty)
+            except (TypeError, ValueError):
+                qty = None
         ok, msg = self.bot.orders.close_by_id(
             trade_id,
+            qty=qty,
             live_prices=self.bot._live_prices,
             reason='manual_dashboard',
         )
-        log.warning(f'Close-one {trade_id}: {msg}')
+        log.warning(f'Close-one {trade_id} (qty={qty}): {msg}')
         status = 200 if ok else 404
         return web.json_response({'ok': ok, 'message': msg}, status=status, headers=_cors())
 

@@ -471,7 +471,9 @@ class TradingBot:
             self.orders.check_exits(self._live_prices)
 
             # Tiered trimming + tape-aware dynamic stops (options only)
-            decisions = self.exit_manager.process(self._live_prices, self.priority_tape)
+            decisions = self.exit_manager.process(
+                self._live_prices, self.priority_tape, self.volume,
+            )
             for d in decisions:
                 log.info(f'[exit] {d.action}={d.quantity} ({d.reason}) pnl={d.pnl_pct*100:+.1f}%')
 

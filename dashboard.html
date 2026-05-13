@@ -157,6 +157,123 @@
       cursor:pointer; display:flex; align-items:center; gap:6px; transition:all 0.15s;
     }
     .btn-export:hover { background:#30363d; border-color:#58a6ff; color:#58a6ff; }
+
+    /* News & earnings grid */
+    .info-grid {
+      display: grid;
+      grid-template-columns: 1.5fr 1fr;
+      gap: 16px;
+    }
+    @media (max-width: 1024px) { .info-grid { grid-template-columns: 1fr; } }
+
+    .news-panel, .earnings-panel {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .news-panel-header, .earnings-panel-header {
+      padding: 10px 16px;
+      background: #1c2128;
+      border-bottom: 1px solid #30363d;
+      font-size: 12px;
+      font-weight: 700;
+      color: #e6edf3;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .news-list, .earnings-list {
+      max-height: 380px;
+      overflow-y: auto;
+    }
+    .news-list::-webkit-scrollbar, .earnings-list::-webkit-scrollbar { width: 6px; }
+    .news-list::-webkit-scrollbar-thumb, .earnings-list::-webkit-scrollbar-thumb {
+      background: #30363d; border-radius: 3px;
+    }
+
+    .news-item {
+      padding: 10px 16px;
+      border-bottom: 1px solid #21262d;
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+    }
+    .news-item:hover { background: #1c2128; }
+    .news-item:last-child { border-bottom: none; }
+
+    .news-sentiment {
+      flex-shrink: 0;
+      width: 4px;
+      align-self: stretch;
+      border-radius: 2px;
+      margin-right: 6px;
+    }
+    .news-sentiment.pos { background: #3fb950; }
+    .news-sentiment.neg { background: #f85149; }
+    .news-sentiment.neu { background: #6e7681; }
+
+    .news-content { flex: 1; min-width: 0; }
+    .news-headline {
+      font-size: 13px;
+      color: #e6edf3;
+      line-height: 1.4;
+      text-decoration: none;
+      display: block;
+    }
+    .news-headline:hover { color: #58a6ff; }
+    .news-meta {
+      font-size: 10px;
+      color: #6e7681;
+      margin-top: 4px;
+      display: flex;
+      gap: 10px;
+    }
+    .news-symbols {
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+      margin-top: 4px;
+    }
+    .news-symbol-tag {
+      background: #21262d;
+      color: #58a6ff;
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-size: 10px;
+      font-weight: 600;
+    }
+
+    .earnings-item {
+      padding: 10px 16px;
+      border-bottom: 1px solid #21262d;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .earnings-item:last-child { border-bottom: none; }
+    .earnings-item:hover { background: #1c2128; }
+    .earnings-symbol { font-weight: 700; color: #e6edf3; font-size: 14px; }
+    .earnings-when {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-weight: 600;
+    }
+    .earnings-when.today  { background: #f8514922; color: #f85149; border: 1px solid #f8514955; }
+    .earnings-when.soon   { background: #e3b34122; color: #e3b341; border: 1px solid #e3b34155; }
+    .earnings-when.later  { background: #21262d;    color: #8b949e; border: 1px solid #30363d; }
+
+    .empty-mini {
+      padding: 24px 16px;
+      text-align: center;
+      color: #6e7681;
+      font-size: 12px;
+      font-style: italic;
+    }
   </style>
 </head>
 <body>
@@ -231,6 +348,28 @@
         </div>
       </div>
       <canvas id="pnl-chart"></canvas>
+    </div>
+  </div>
+
+  <!-- News + Earnings -->
+  <div class="info-grid">
+    <div class="news-panel">
+      <div class="news-panel-header">
+        <span>Market News</span>
+        <span class="badge" id="news-count">0</span>
+      </div>
+      <div class="news-list" id="news-list">
+        <div class="empty-mini">Waiting for news feed...</div>
+      </div>
+    </div>
+    <div class="earnings-panel">
+      <div class="earnings-panel-header">
+        <span>Upcoming Earnings (14d)</span>
+        <span class="badge" id="earnings-count">0</span>
+      </div>
+      <div class="earnings-list" id="earnings-list">
+        <div class="empty-mini">No earnings scheduled in watchlist</div>
+      </div>
     </div>
   </div>
 
@@ -518,6 +657,12 @@
     // Chart
     buildChart(data.historical_trades || [], currentRange);
 
+    // News
+    renderNews(data.news || []);
+
+    // Earnings
+    renderEarnings(data.earnings || []);
+
     // ── Open positions
     const openTrades = data.open_positions || [];
     document.getElementById('open-count').textContent = openTrades.length;
@@ -568,6 +713,78 @@
         </tr>`;
       }).join('');
     }
+  }
+
+  // ── News & earnings renderers ─────────────────────────────────────────────
+
+  function fmtRelativeTime(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    const diffMin = Math.floor((Date.now() - d.getTime()) / 60000);
+    if (diffMin < 1)   return 'just now';
+    if (diffMin < 60)  return `${diffMin}m ago`;
+    if (diffMin < 1440) return `${Math.floor(diffMin / 60)}h ago`;
+    return `${Math.floor(diffMin / 1440)}d ago`;
+  }
+
+  function renderNews(articles) {
+    document.getElementById('news-count').textContent = articles.length;
+    const list = document.getElementById('news-list');
+    if (!articles.length) {
+      list.innerHTML = '<div class="empty-mini">No recent news for watchlist symbols</div>';
+      return;
+    }
+    list.innerHTML = articles.map(a => {
+      const s = parseFloat(a.sentiment || 0);
+      const sCls = s > 0.2 ? 'pos' : (s < -0.2 ? 'neg' : 'neu');
+      const symbols = (a.symbols || []).slice(0, 4)
+        .map(sym => `<span class="news-symbol-tag">${sym}</span>`).join('');
+      const url = a.url || '#';
+      const headline = (a.headline || '').replace(/</g, '&lt;');
+      const source = a.source || 'unknown';
+      const when = fmtRelativeTime(a.created_at);
+      return `
+        <div class="news-item">
+          <div class="news-sentiment ${sCls}"></div>
+          <div class="news-content">
+            <a class="news-headline" href="${url}" target="_blank" rel="noopener">${headline}</a>
+            <div class="news-meta">
+              <span>${source}</span>
+              <span>${when}</span>
+              ${s !== 0 ? `<span class="${s > 0 ? 'green' : 'red'}">${s > 0 ? '+' : ''}${s.toFixed(2)}</span>` : ''}
+            </div>
+            ${symbols ? `<div class="news-symbols">${symbols}</div>` : ''}
+          </div>
+        </div>`;
+    }).join('');
+  }
+
+  function renderEarnings(items) {
+    document.getElementById('earnings-count').textContent = items.length;
+    const list = document.getElementById('earnings-list');
+    if (!items.length) {
+      list.innerHTML = '<div class="empty-mini">No earnings scheduled in watchlist</div>';
+      return;
+    }
+    list.innerHTML = items.map(e => {
+      const days = e.days_away;
+      let cls, label;
+      if (days === 0)      { cls = 'today';  label = 'TODAY'; }
+      else if (days === 1) { cls = 'today';  label = 'TOMORROW'; }
+      else if (days <= 7)  { cls = 'soon';   label = `${days}d`; }
+      else                 { cls = 'later';  label = `${days}d`; }
+      const dateStr = new Date(e.date + 'T00:00').toLocaleDateString('en-US', {
+        month: 'short', day: 'numeric',
+      });
+      return `
+        <div class="earnings-item">
+          <div>
+            <div class="earnings-symbol">${e.symbol}</div>
+            <div style="font-size:11px;color:#6e7681;margin-top:2px;">${dateStr}</div>
+          </div>
+          <span class="earnings-when ${cls}">${label}</span>
+        </div>`;
+    }).join('');
   }
 
   // ── Data loading ──────────────────────────────────────────────────────────

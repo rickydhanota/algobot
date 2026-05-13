@@ -41,6 +41,9 @@ from strategy.stock_strategy import StockStrategy
 from strategy.options_strategy import OptionsStrategy
 from execution.order_manager import OrderManager, ActiveTrade
 from performance.tracker import PerformanceTracker
+from news.alpaca_news import AlpacaNewsFeed
+from news.earnings import EarningsCalendar, IPOCalendar
+from news.sentiment import score_articles, score_text
 
 ET = pytz.timezone('America/New_York')
 log = logging.getLogger('bot')
@@ -75,12 +78,19 @@ class TradingBot:
         self.orders = OrderManager(self.risk)
         self.tracker = PerformanceTracker()
 
+        # News & calendars
+        self.news = AlpacaNewsFeed()
+        self.earnings = EarningsCalendar()
+        self.ipos = IPOCalendar()
+
         self._traded_today: Set[str] = set()
         self._running = False
         self._phase = 'premarket'
         self._bars_cache = {}
         self._live_prices: Dict[str, float] = {}
         self._live_vwap: Dict[str, float] = {}
+        self._last_news_fetch: Optional[datetime] = None
+        self._sentiment_cache: Dict[str, dict] = {}
 
     # ── Market data streaming ─────────────────────────────────────────────────
 
@@ -129,11 +139,53 @@ class TradingBot:
         except Exception:
             pass
 
+    def _refresh_news_if_due(self):
+        """Refresh news every NEWS_FETCH_INTERVAL_MIN minutes."""
+        now_utc = datetime.now(timezone.utc)
+        if (self._last_news_fetch and
+                (now_utc - self._last_news_fetch).total_seconds() < config.NEWS_FETCH_INTERVAL_MIN * 60):
+            return
+
+        self.news.fetch(self.watchlist, hours=config.NEWS_LOOKBACK_HOURS)
+        for sym in self.watchlist:
+            arts = self.news.for_symbol(sym)
+            self._sentiment_cache[sym] = score_articles(arts)
+        self._last_news_fetch = now_utc
+
+    def _news_filter(self, symbol: str) -> tuple[bool, int, str]:
+        """
+        Apply news/earnings filter.
+        Returns: (allowed, score_adjustment, reason)
+        """
+        # Earnings circuit breaker
+        if self.earnings.has_earnings_within(symbol, days=config.SKIP_EARNINGS_DAYS):
+            days = self.earnings.days_until_earnings(symbol) or 0
+            return False, 0, f'earnings in {days}d'
+
+        # News sentiment
+        sent = self._sentiment_cache.get(symbol, {})
+        score = sent.get('score', 0.0)
+        adjustment = 0
+
+        if score <= config.NEWS_NEGATIVE_THRESHOLD:
+            return False, 0, f'negative news ({score:+.2f})'
+
+        if score >= config.NEWS_POSITIVE_BOOST:
+            adjustment = config.NEWS_SCORE_BONUS
+
+        return True, adjustment, ''
+
     # ── Signal evaluation ─────────────────────────────────────────────────────
 
     def _evaluate_symbol(self, sym: str) -> Optional[dict]:
         """Return a trade setup dict if symbol has a high-quality signal."""
         if sym in self._traded_today:
+            return None
+
+        # News & earnings filter — gate BEFORE expensive analysis
+        allowed, score_adj, reason = self._news_filter(sym)
+        if not allowed:
+            log.debug(f'[{sym}] Skipped: {reason}')
             return None
 
         price = self._live_prices.get(sym)
@@ -144,7 +196,6 @@ class TradingBot:
         if bars is None or bars.empty:
             return None
 
-        # Refresh bars every 2 minutes
         try:
             bars = self.market_data.get_bars(sym)
             self._bars_cache[sym] = bars
@@ -163,6 +214,11 @@ class TradingBot:
         # ── Stock setup
         stock_setup = self.stock_strategy.evaluate(tech, tape_signal)
         if stock_setup:
+            stock_setup.score = min(100, stock_setup.score + score_adj)
+            if score_adj > 0:
+                stock_setup.notes.append(f'news+{score_adj}')
+            if stock_setup.score < config.MIN_SIGNAL_SCORE:
+                return None
             return {'type': 'stock', 'setup': stock_setup, 'tech': tech, 'tape': tape_signal}
 
         # ── Options setup (if enabled and underlying has a bias)
@@ -188,12 +244,15 @@ class TradingBot:
                 break
 
             if phase == 'premarket':
+                # Pre-market: refresh earnings calendar + news ahead of open
+                self.earnings.refresh(self.watchlist)
+                self._refresh_news_if_due()
                 await asyncio.sleep(30)
                 continue
 
             if phase == 'orb_capture':
-                # Refresh bars to capture first 15-min range
                 self._capture_orb()
+                self._refresh_news_if_due()
                 await asyncio.sleep(60)
                 continue
 
@@ -216,6 +275,7 @@ class TradingBot:
                 continue
 
             self._update_account()
+            self._refresh_news_if_due()
             self.orders.check_exits(self._live_prices)
 
             # Scan watchlist for setups
@@ -434,6 +494,16 @@ class TradingBot:
         )
 
         all_time_stats = self.tracker.stats()
+
+        # News / earnings context for dashboard
+        news_articles = self.news.all_recent(limit=25)
+        for art in news_articles:
+            art['sentiment'] = round(score_text(
+                f"{art.get('headline','')} {art.get('summary','')}"
+            ), 3)
+
+        earnings_upcoming = self.earnings.upcoming(self.watchlist, within_days=14)
+
         data = {
             'generated_at':    now.isoformat(),
             'phase':           self._phase,
@@ -447,6 +517,9 @@ class TradingBot:
             'open_positions':  [trade_to_dict(t, self._live_prices.get(t.symbol)) for t in open_trades],
             'closed_trades':   [trade_to_dict(t) for t in closed],
             'historical_trades': self.tracker.all_trades_for_chart(since_days=365),
+            'news':            news_articles,
+            'earnings':        earnings_upcoming,
+            'sentiment':       self._sentiment_cache,
         }
 
         js = f'window.DASHBOARD_DATA = {json.dumps(data, indent=2)};\n'

@@ -46,6 +46,14 @@ OPT_MAX_SPREAD_PCT = 0.10         # skip wide spreads > 10% of mid
 OPT_IV_RANK_BUY_MAX = 40          # buy options when IVR < 40
 OPT_IV_RANK_SELL_MIN = 60         # sell premium when IVR > 60
 
+# ── News & earnings filters ───────────────────────────────────────────────────
+NEWS_FETCH_INTERVAL_MIN = 15       # how often to refresh news (minutes)
+NEWS_LOOKBACK_HOURS = 24           # how far back to fetch articles
+SKIP_EARNINGS_DAYS = 1             # skip trades if earnings within N days
+NEWS_NEGATIVE_THRESHOLD = -0.30    # sentiment ≤ this rejects the trade
+NEWS_POSITIVE_BOOST = 0.30         # sentiment ≥ this adds bonus to signal score
+NEWS_SCORE_BONUS = 5               # points added/subtracted from signal score
+
 # ── Default watchlist ─────────────────────────────────────────────────────────
 WATCHLIST = [
     'SPY', 'QQQ', 'IWM',

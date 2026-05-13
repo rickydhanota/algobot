@@ -48,6 +48,7 @@ from news.earnings import EarningsCalendar, IPOCalendar
 from news.sentiment import score_articles, score_text
 from news.macro_feeds import MacroFeedAggregator
 from news.macro_analysis import assess as assess_macro, MacroRisk
+from intel.aggregator import IntelAggregator
 
 ET = pytz.timezone('America/New_York')
 log = logging.getLogger('bot')
@@ -92,6 +93,7 @@ class TradingBot:
         self.ipos = IPOCalendar()
         self.macro_feeds = MacroFeedAggregator()
         self.macro_risk: MacroRisk = MacroRisk()
+        self.intel = IntelAggregator()
 
         self._traded_today: Set[str] = set()
         self._running = False
@@ -101,6 +103,7 @@ class TradingBot:
         self._live_vwap: Dict[str, float] = {}
         self._last_news_fetch: Optional[datetime] = None
         self._last_macro_fetch: Optional[datetime] = None
+        self._last_intel_fetch: Optional[datetime] = None
         self._sentiment_cache: Dict[str, dict] = {}
 
     # ── Market data streaming ─────────────────────────────────────────────────
@@ -184,6 +187,19 @@ class TradingBot:
             f'FOMC={self.macro_risk.next_fomc_days}d  risk={self.macro_risk.risk_level}'
         )
 
+    def _refresh_intel_if_due(self):
+        """Refresh 13F filings + congressional trades every INTEL_REFRESH_HOURS."""
+        now_utc = datetime.now(timezone.utc)
+        if (self._last_intel_fetch and
+                (now_utc - self._last_intel_fetch).total_seconds() < config.INTEL_REFRESH_HOURS * 3600):
+            return
+
+        try:
+            self.intel.refresh(self.watchlist)
+            self._last_intel_fetch = now_utc
+        except Exception as e:
+            log.warning(f'Intel refresh failed: {e}')
+
     def _apply_macro_risk(self):
         """Translate MacroRisk into risk-manager state."""
         self.risk.macro_risk_multiplier = self.macro_risk.risk_multiplier
@@ -266,11 +282,17 @@ class TradingBot:
         # ── Stock setup
         stock_setup = self.stock_strategy.evaluate(tech, tape_signal)
         if stock_setup:
-            stock_setup.score = min(100, stock_setup.score + score_adj + priority_boost)
+            intel_boost = min(
+                config.INTEL_SCORE_BOOST_MAX,
+                self.intel.score_boost(sym, stock_setup.direction),
+            )
+            stock_setup.score = min(100, stock_setup.score + score_adj + priority_boost + intel_boost)
             if score_adj > 0:
                 stock_setup.notes.append(f'news+{score_adj}')
             if priority_boost > 0:
                 stock_setup.notes.append(f'priority+{priority_boost}')
+            if intel_boost > 0:
+                stock_setup.notes.append(f'smartmoney+{intel_boost}')
 
             # Adaptive threshold per (symbol, strategy)
             adj = self.adaptive.threshold_adjustment(sym, stock_setup.strategy)
@@ -318,6 +340,7 @@ class TradingBot:
                 self.earnings.refresh(self.watchlist)
                 self._refresh_news_if_due()
                 self._refresh_macro_if_due()
+                self._refresh_intel_if_due()
                 await asyncio.sleep(30)
                 continue
 
@@ -601,6 +624,7 @@ class TradingBot:
             'macro_risk':      self.macro_risk.to_dict(),
             'priority_tape':   self.priority_tape.snapshot_all(),
             'adaptive_stats':  self.adaptive.all_stats(),
+            'intel':           self.intel.dashboard_data(),
         }
 
         js = f'window.DASHBOARD_DATA = {json.dumps(data, indent=2)};\n'

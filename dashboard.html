@@ -360,6 +360,37 @@
     }
     .flag.alert { background:#3a1a1a; color:#f85149; border:1px solid #f85149; }
 
+    /* Intel panels (13F + Congress) */
+    .intel-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+    @media (max-width: 1024px) { .intel-grid { grid-template-columns: 1fr; } }
+
+    .intel-row {
+      padding: 10px 14px;
+      border-bottom: 1px solid #21262d;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+    }
+    .intel-row:hover { background: #1c2128; }
+    .intel-row:last-child { border-bottom: none; }
+    .intel-sym { font-weight: 700; color: #e6edf3; font-size: 13px; min-width: 60px; }
+    .intel-detail { font-size: 11px; color: #8b949e; flex: 1; }
+    .intel-fund-list {
+      font-size: 10px; color: #6e7681; margin-top: 2px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .intel-side-buy  { color:#3fb950; font-weight:700; }
+    .intel-side-sell { color:#f85149; font-weight:700; }
+    .intel-amount {
+      font-size: 11px; padding: 2px 7px; border-radius: 3px;
+      background:#21262d; color:#8b949e; border:1px solid #30363d;
+    }
+
     /* Adaptive learning table */
     .learn-table { width: 100%; border-collapse: collapse; font-size: 12px; }
     .learn-table th { padding: 6px 10px; color: #8b949e; font-weight: 600;
@@ -508,6 +539,34 @@
           <span class="priority-conf weak">—</span>
         </div>
         <div style="color:#6e7681;font-size:12px;font-style:italic;">Waiting for tape data...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Smart Money + Congress Watch -->
+  <div>
+    <div class="section-header">
+      <span class="section-title">Smart Money — 13F Holdings & Congressional Trades</span>
+      <span class="badge">stale 30-90 days (regulatory)</span>
+    </div>
+    <div class="intel-grid">
+      <div class="news-panel">
+        <div class="news-panel-header">
+          <span>13F: Top Holdings (Buffett, Burry, Dalio…)</span>
+          <span class="badge" id="intel-funds-count">0</span>
+        </div>
+        <div class="news-list" id="intel-funds-list" style="max-height: 360px;">
+          <div class="empty-mini">Waiting for 13F filings...</div>
+        </div>
+      </div>
+      <div class="news-panel">
+        <div class="news-panel-header">
+          <span>Congress Watch — Recent Trades</span>
+          <span class="badge" id="intel-pol-count">0</span>
+        </div>
+        <div class="news-list" id="intel-pol-list" style="max-height: 360px;">
+          <div class="empty-mini">Waiting for STOCK Act filings...</div>
+        </div>
       </div>
     </div>
   </div>
@@ -858,6 +917,9 @@
     // Chart
     buildChart(data.historical_trades || [], currentRange);
 
+    // Smart money / congressional intel
+    renderIntel(data.intel || {});
+
     // Priority tape (SPY/SPX/TSLA)
     renderPriorityTape(data.priority_tape || {});
 
@@ -924,6 +986,66 @@
           <td class="center">${fmtTime(t.entry_time)}</td>
           <td class="center">${fmtTime(t.exit_time)}</td>
         </tr>`;
+      }).join('');
+    }
+  }
+
+  // ── Smart money / congressional intel ─────────────────────────────────────
+
+  function fmtBillions(n) {
+    if (n == null || n === 0) return '$0';
+    if (n >= 1e9)  return '$' + (n / 1e9).toFixed(1) + 'B';
+    if (n >= 1e6)  return '$' + (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e3)  return '$' + (n / 1e3).toFixed(0) + 'K';
+    return '$' + n.toFixed(0);
+  }
+
+  function renderIntel(intel) {
+    // 13F panel — top funds-held watchlist names
+    const picks = intel.top_fund_picks || [];
+    document.getElementById('intel-funds-count').textContent = picks.length;
+    const fundsList = document.getElementById('intel-funds-list');
+    if (!picks.length) {
+      fundsList.innerHTML = '<div class="empty-mini">No 13F holdings match watchlist yet</div>';
+    } else {
+      fundsList.innerHTML = picks.map(p => {
+        const fundNames = (p.top_holders || []).map(h => h.fund.split(' (')[0]).slice(0, 3).join(', ');
+        return `
+          <div class="intel-row">
+            <div>
+              <div class="intel-sym">${p.symbol}</div>
+              <div class="intel-fund-list" title="${fundNames}">${fundNames}</div>
+            </div>
+            <div style="text-align:right;">
+              <div class="intel-detail">${p.fund_count} fund${p.fund_count !== 1 ? 's' : ''}</div>
+              <div class="intel-sym cyan">${fmtBillions(p.total_value)}</div>
+            </div>
+          </div>`;
+      }).join('');
+    }
+
+    // Congressional trades panel
+    const pol = intel.recent_political || [];
+    document.getElementById('intel-pol-count').textContent = pol.length;
+    const polList = document.getElementById('intel-pol-list');
+    if (!pol.length) {
+      polList.innerHTML = '<div class="empty-mini">No recent congressional trades</div>';
+    } else {
+      polList.innerHTML = pol.slice(0, 25).map(t => {
+        const sideCls = t.side === 'buy' ? 'intel-side-buy' : (t.side === 'sell' ? 'intel-side-sell' : '');
+        const sideLabel = (t.side || '?').toUpperCase();
+        const name = (t.politician || 'Unknown').replace(/</g, '&lt;');
+        return `
+          <div class="intel-row">
+            <div>
+              <div class="intel-sym">${t.ticker} <span class="${sideCls}">${sideLabel}</span></div>
+              <div class="intel-fund-list">${name} · ${t.chamber}</div>
+            </div>
+            <div style="text-align:right;">
+              <div class="intel-amount">${t.amount || ''}</div>
+              <div class="intel-fund-list">${t.date}</div>
+            </div>
+          </div>`;
       }).join('');
     }
   }

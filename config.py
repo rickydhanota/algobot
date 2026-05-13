@@ -54,6 +54,10 @@ NEWS_NEGATIVE_THRESHOLD = -0.30    # sentiment ≤ this rejects the trade
 NEWS_POSITIVE_BOOST = 0.30         # sentiment ≥ this adds bonus to signal score
 NEWS_SCORE_BONUS = 5               # points added/subtracted from signal score
 
+# ── Intel: 13F filings + congressional trades ────────────────────────────────
+INTEL_REFRESH_HOURS = 6            # how often to refresh 13F + political feeds
+INTEL_SCORE_BOOST_MAX = 5          # cap on score boost from smart-money alignment
+
 # ── Macro / Fed / White House monitoring ──────────────────────────────────────
 MACRO_FETCH_INTERVAL_MIN = 30      # how often to refresh macro feeds
 MACRO_LOOKBACK_HOURS = 48          # how far back to read Fed/WH articles

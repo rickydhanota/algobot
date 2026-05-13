@@ -125,7 +125,9 @@ class TradingBot:
                 self.priority_tape.record_trade(sym, price, size)
 
         stream.subscribe_trades(on_trade, *self.watchlist)
-        await stream.run()
+        # stream.run() is sync — it spawns its own event loop, which fails
+        # silently when called from inside ours. Use _run_forever() directly.
+        await stream._run_forever()
 
     # ── Session setup ─────────────────────────────────────────────────────────
 
@@ -638,6 +640,25 @@ class TradingBot:
 
         log.info('=== AlgoBot starting ===')
         self._load_bars()
+
+        # One-shot refresh of all news/intel feeds at startup so we have
+        # current state regardless of when in the session we launched.
+        try:
+            self.earnings.refresh(self.watchlist)
+        except Exception as e:
+            log.warning(f'Startup earnings refresh failed: {e}')
+        try:
+            self._refresh_news_if_due()
+        except Exception as e:
+            log.warning(f'Startup news refresh failed: {e}')
+        try:
+            self._refresh_macro_if_due()
+        except Exception as e:
+            log.warning(f'Startup macro refresh failed: {e}')
+        try:
+            self._refresh_intel_if_due()
+        except Exception as e:
+            log.warning(f'Startup intel refresh failed: {e}')
 
         stream_task = asyncio.create_task(self._stream_trades())
         await asyncio.sleep(3)

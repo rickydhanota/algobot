@@ -4,7 +4,7 @@ Performance tracker: SQLite-backed trade log with win-rate and P&L stats.
 from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 

@@ -47,7 +47,7 @@ class AlpacaNewsFeed:
             return
         try:
             req = NewsRequest(
-                symbols=symbols,
+                symbols=','.join(symbols),
                 start=datetime.now(timezone.utc) - timedelta(hours=hours),
                 limit=50,
                 include_content=False,

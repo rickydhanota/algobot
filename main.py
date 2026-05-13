@@ -420,8 +420,11 @@ class TradingBot:
             self._phase = phase
 
             if phase == 'closed':
-                self._running = False
-                break
+                # Market is closed — stop trading but KEEP the dashboard
+                # server alive so the user can review the session.
+                # User must Ctrl+C / kill the process to fully exit.
+                await asyncio.sleep(30)
+                continue
 
             if phase == 'premarket':
                 self.earnings.refresh(self.watchlist)

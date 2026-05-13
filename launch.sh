@@ -2,7 +2,7 @@
 # Auto-launched by cron at 6:25 AM PT (9:25 AM ET) on weekdays.
 # Waits for market open, then starts the bot. Logs to bot.log.
 
-BOT_DIR="$HOME/trading_bot"
+BOT_DIR="$HOME/Desktop/trading_bot"
 LOG="$BOT_DIR/bot.log"
 PYTHON="$BOT_DIR/.venv/bin/python"
 

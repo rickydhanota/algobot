@@ -51,9 +51,10 @@ class DashboardServer:
         app.router.add_get  ('/',                 self._serve_index)
         app.router.add_get  ('/api/data',         self._serve_data)
         app.router.add_get  ('/api/status',       self._serve_status)
-        app.router.add_post ('/api/close-all',    self._close_all)
-        app.router.add_post ('/api/pause',        self._pause)
-        app.router.add_post ('/api/resume',       self._resume)
+        app.router.add_post ('/api/close-all',           self._close_all)
+        app.router.add_post ('/api/close/{trade_id}',    self._close_one)
+        app.router.add_post ('/api/pause',               self._pause)
+        app.router.add_post ('/api/resume',              self._resume)
         app.router.add_route('OPTIONS', '/{tail:.*}', self._preflight)
 
         self._runner = web.AppRunner(app, access_log=None)
@@ -101,6 +102,17 @@ class DashboardServer:
             {'status': 'close-all queued', 'open_count': open_count},
             headers=_cors(),
         )
+
+    async def _close_one(self, request):
+        trade_id = request.match_info['trade_id']
+        ok, msg = self.bot.orders.close_by_id(
+            trade_id,
+            live_prices=self.bot._live_prices,
+            reason='manual_dashboard',
+        )
+        log.warning(f'Close-one {trade_id}: {msg}')
+        status = 200 if ok else 404
+        return web.json_response({'ok': ok, 'message': msg}, status=status, headers=_cors())
 
     async def _pause(self, request):
         self.bot._paused = True

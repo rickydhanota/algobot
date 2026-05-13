@@ -269,6 +269,20 @@ class OrderManager:
         # Bank the partial P&L day-level
         self.risk.record_daily_pnl(partial_pnl)
 
+    def close_by_id(self, trade_id: str, live_prices: dict = None, reason: str = 'manual') -> tuple[bool, str]:
+        """Close a single open position by trade_id. Returns (ok, message)."""
+        trade = self.active.get(trade_id)
+        if trade is None:
+            return False, f'trade {trade_id} not found'
+        if trade.status != 'open':
+            return False, f'trade {trade_id} is not open (status={trade.status})'
+        price = (live_prices or {}).get(trade.symbol) or trade.entry_price
+        try:
+            self._close_trade(trade, price, reason)
+            return True, f'closed {trade.symbol} @ {price:.2f}'
+        except Exception as e:
+            return False, f'close failed: {e}'
+
     def close_all(self):
         """EOD: close all open positions."""
         for trade in self.active.values():

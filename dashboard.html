@@ -192,6 +192,26 @@
       margin-left: 4px;
     }
 
+    /* Per-row close button */
+    .btn-close-row {
+      background: #2a1a1a;
+      border: 1px solid #f8514955;
+      color: #f85149;
+      padding: 4px 10px;
+      border-radius: 4px;
+      font-family: inherit;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.12s;
+    }
+    .btn-close-row:hover {
+      background: #f85149;
+      color: #fff;
+      border-color: #f85149;
+    }
+    .btn-close-row:disabled { opacity: 0.5; cursor: not-allowed; }
+
     /* News & earnings grid */
     .info-grid {
       display: grid;
@@ -698,10 +718,11 @@
             <th class="right">Target</th>
             <th class="right">Unreal P&amp;L</th>
             <th class="center">Opened (PT)</th>
+            <th class="center">Action</th>
           </tr>
         </thead>
         <tbody id="open-body">
-          <tr class="empty-row"><td colspan="10">No open positions</td></tr>
+          <tr class="empty-row"><td colspan="11">No open positions</td></tr>
         </tbody>
       </table>
     </div>
@@ -1000,6 +1021,9 @@
         const qtyDisplay = t.asset_type === 'option' && t.original_contracts && t.original_contracts !== t.contracts
           ? `${t.contracts}c <small style="color:#6e7681">/ ${t.original_contracts}c</small>`
           : qtyCell(t);
+        const closeBtn = t.trade_id
+          ? `<button class="btn-close-row" onclick="closeOneTrade('${t.trade_id}', '${t.symbol}')">Close</button>`
+          : '<span style="color:#6e7681">—</span>';
         return `<tr>
           <td class="ticker">${t.symbol}${partialBadge}</td>
           <td class="center">${typeCell(t)}</td>
@@ -1011,6 +1035,7 @@
           <td class="right" style="color:#6e7681">${fmtMoney(t.target_price)}</td>
           <td class="right ${pnlClass(upnl)}">${fmtMoney(upnl, true)}${partialPnl !== 0 ? ` <small class="${pnlClass(partialPnl)}">(+${fmtMoney(partialPnl)})</small>` : ''}</td>
           <td class="center">${fmtTime(t.entry_time)}</td>
+          <td class="center">${closeBtn}</td>
         </tr>`;
       }).join('');
     }
@@ -1465,6 +1490,29 @@
         btn.disabled = false;
         btn.innerHTML = '🛑 Force Close All';
       }, 3000);
+    }
+  }
+
+  async function closeOneTrade(tradeId, symbol) {
+    if (!HAS_SERVER) {
+      alert('Open dashboard at http://localhost:8765 to close individual trades.');
+      return;
+    }
+    if (!confirm(`Close ${symbol} position now at market?`)) return;
+    const btn = event.target;
+    btn.disabled = true;
+    btn.textContent = 'Closing...';
+    try {
+      const r = await fetch(API_BASE + '/api/close/' + encodeURIComponent(tradeId), { method: 'POST' });
+      const j = await r.json();
+      if (!j.ok) alert('Close failed: ' + (j.message || 'unknown'));
+    } catch (e) {
+      alert('Network error: ' + e.message);
+    } finally {
+      setTimeout(() => {
+        btn.disabled = false;
+        btn.textContent = 'Close';
+      }, 2000);
     }
   }
 

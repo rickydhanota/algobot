@@ -679,6 +679,7 @@ class TradingBot:
             mult = 1 if t.direction in ('long', 'buy') else -1
             upnl = (cp - t.entry_price) * t.shares * mult
             return {
+                'trade_id':      t.trade_id,
                 'symbol':        t.symbol,
                 'asset_type':    t.asset_type,
                 'option_type':   t.option_type,

@@ -920,8 +920,8 @@
     // Smart money / congressional intel
     renderIntel(data.intel || {});
 
-    // Priority tape (SPY/SPX/TSLA)
-    renderPriorityTape(data.priority_tape || {});
+    // Priority tape (SPY/SPX/TSLA) with volume overlay
+    renderPriorityTape(data.priority_tape || {}, data.priority_volume || {});
 
     // Adaptive learning stats
     renderAdaptiveStats(data.adaptive_stats || []);
@@ -1052,11 +1052,12 @@
 
   // ── Priority tape (SPY/SPX/TSLA) ──────────────────────────────────────────
 
-  function renderPriorityTape(snapshot) {
+  function renderPriorityTape(snapshot, volSnapshot) {
     const symbols = ['SPY', 'SPX', 'TSLA'];
     const grid = document.getElementById('priority-grid');
     grid.innerHTML = symbols.map(sym => {
       const d = snapshot[sym];
+      const v = (volSnapshot || {})[sym];
       if (!d) {
         return `
           <div class="priority-card neutral">
@@ -1117,6 +1118,22 @@
               <span class="priority-metric-label">Sample</span>
               <span class="priority-metric-value">${d.sample_count.toLocaleString()} trades</span>
             </div>
+            ${v ? `
+              <div class="priority-metric">
+                <span class="priority-metric-label">Volume rate</span>
+                <span class="priority-metric-value ${v.is_healthy ? 'green' : 'red'}">
+                  ${v.rate_ratio.toFixed(2)}× <span class="pill ${v.is_stale ? 'alert' : (v.is_healthy ? 'ok' : 'warn')}">${v.health_label}</span>
+                </span>
+              </div>
+              <div class="priority-metric">
+                <span class="priority-metric-label">Prints (60s / 5m)</span>
+                <span class="priority-metric-value">${v.trades_last_60s} / ${v.trades_last_5min}</span>
+              </div>
+              <div class="priority-metric">
+                <span class="priority-metric-label">Last print</span>
+                <span class="priority-metric-value ${v.is_stale ? 'red' : ''}">${v.last_trade_age_s.toFixed(1)}s ago</span>
+              </div>
+            ` : ''}
             ${sweepFlag ? `<div style="margin-top:6px;">${sweepFlag}</div>` : ''}
           </div>
         </div>`;

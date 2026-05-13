@@ -37,6 +37,8 @@ from data.market_data import MarketDataManager
 from signals.tape_reader import TapeReader
 from signals.priority_tape import PriorityTapeReader, PRIORITY_SYMBOLS
 from signals.technical import TechnicalAnalyzer
+from signals.volume_monitor import VolumeMonitor
+from signals.entry_quality import EntryQualityChecker, MIN_QUALITY_TO_TRADE
 from learning.adaptive import AdaptiveLearner
 from strategy.risk_manager import RiskManager
 from strategy.stock_strategy import StockStrategy
@@ -79,6 +81,8 @@ class TradingBot:
         self.market_data = MarketDataManager()
         self.tape = TapeReader()
         self.priority_tape = PriorityTapeReader()
+        self.volume = VolumeMonitor()
+        self.entry_quality = EntryQualityChecker()
         self.adaptive = AdaptiveLearner()
         self.analyzer = TechnicalAnalyzer()
         self.risk = RiskManager()
@@ -120,9 +124,14 @@ class TradingBot:
             vwap = self.market_data.update_vwap(sym, price, size)
             self._live_vwap[sym] = vwap
             self.tape.record_trade(sym, price, size)
-            # Enhanced reader (SPY trades also populate SPX proxy buffer)
+            # Priority symbols get richer tracking
             if sym in PRIORITY_SYMBOLS or sym == 'SPY':
                 self.priority_tape.record_trade(sym, price, size)
+                self.volume.record_trade(sym, size)
+                self.entry_quality.record_price(sym, price)
+                if sym == 'SPY':
+                    # also feed SPX proxy
+                    self.entry_quality.record_price('SPX', price)
 
         stream.subscribe_trades(on_trade, *self.watchlist)
         # stream.run() is sync — it spawns its own event loop, which fails
@@ -274,7 +283,14 @@ class TradingBot:
         # ── Priority tape boost for SPY / SPX / TSLA
         priority_sig = None
         priority_boost = 0
+        volume_state = None
         if sym in PRIORITY_SYMBOLS:
+            # Hard volume gate: skip thin or stale tape outright
+            ok, why = self.volume.is_tradeable(sym)
+            if not ok:
+                log.debug(f'[{sym}] Volume gate: {why}')
+                return None
+            volume_state = self.volume.analyze(sym)
             priority_sig = self.priority_tape.analyze(sym)
             if priority_sig and priority_sig.is_strong:
                 priority_boost = 10
@@ -325,6 +341,51 @@ class TradingBot:
                     return {'type': 'option', 'setup': opt_setup, 'tech': tech, 'tape': tape_signal}
 
         return None
+
+    def _entry_quality_ok(self, sym: str, result: dict) -> bool:
+        """Run pre-trade entry checks; reject chasing, wide spreads, etc."""
+        setup = result['setup']
+        tech = result.get('tech')
+        tape = result.get('tape')
+
+        # For stocks: validate against the underlying symbol.
+        # For options: validate against the underlying instead of the option symbol.
+        underlying = sym  # main loop iterates watchlist (underlying) symbols
+        price = self._live_prices.get(underlying, 0)
+        vwap = self._live_vwap.get(underlying, 0)
+
+        # Best-effort bid/ask from cached snapshot
+        snap = self.market_data._quotes.get(underlying)
+        bid = snap.bid if snap else 0
+        ask = snap.ask if snap else 0
+
+        # Volume health for priority symbols
+        vol_healthy = True
+        if underlying in PRIORITY_SYMBOLS:
+            v = self.volume.analyze(underlying)
+            vol_healthy = v.is_healthy if v else True
+
+        direction = 'long' if setup.direction in ('long', 'buy') else 'short'
+        imb = tape.imbalance if tape else 0
+
+        verdict = self.entry_quality.check(
+            symbol=underlying,
+            direction=direction,
+            entry_price=price,
+            vwap=vwap,
+            bid=bid,
+            ask=ask,
+            imbalance=imb,
+            volume_healthy=vol_healthy,
+        )
+
+        if not verdict.allowed:
+            log.info(f'[{underlying}] Entry rejected: {verdict.reason}')
+            return False
+
+        if hasattr(setup, 'notes'):
+            setup.notes.append(f'entryQ={verdict.score}')
+        return True
 
     # ── Main loop ─────────────────────────────────────────────────────────────
 
@@ -380,6 +441,11 @@ class TradingBot:
             for sym in self.watchlist:
                 result = self._evaluate_symbol(sym)
                 if result is None:
+                    continue
+
+                # Pre-trade entry-quality gate: don't chase, don't enter
+                # on wide spreads, don't trade far from VWAP
+                if not self._entry_quality_ok(sym, result):
                     continue
 
                 if result['type'] == 'stock':
@@ -625,6 +691,7 @@ class TradingBot:
             'macro_news':      self.macro_feeds.all(limit=20),
             'macro_risk':      self.macro_risk.to_dict(),
             'priority_tape':   self.priority_tape.snapshot_all(),
+            'priority_volume': self.volume.snapshot_all(),
             'adaptive_stats':  self.adaptive.all_stats(),
             'intel':           self.intel.dashboard_data(),
         }

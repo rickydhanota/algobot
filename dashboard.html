@@ -158,6 +158,40 @@
     }
     .btn-export:hover { background:#30363d; border-color:#58a6ff; color:#58a6ff; }
 
+    /* Force-close button: red, prominent */
+    .btn-force-close {
+      background: linear-gradient(180deg, #f85149, #b8302b);
+      border: 1px solid #b8302b; color: #fff;
+      padding: 8px 18px; border-radius: 6px; font-family: inherit;
+      font-size: 13px; font-weight: 700; letter-spacing: 0.5px;
+      cursor: pointer; transition: all 0.15s;
+      text-transform: uppercase;
+      box-shadow: 0 1px 3px rgba(248,81,73,0.3);
+    }
+    .btn-force-close:hover { transform: translateY(-1px); box-shadow: 0 4px 10px rgba(248,81,73,0.4); }
+    .btn-force-close:active { transform: translateY(0); }
+    .btn-force-close:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .btn-pause {
+      background: #21262d; border: 1px solid #e3b341; color: #e3b341;
+      padding: 8px 14px; border-radius: 6px; font-family: inherit;
+      font-size: 12px; font-weight: 600; cursor: pointer;
+    }
+    .btn-pause:hover { background: #2a2418; }
+
+    .controls-bar {
+      display: flex; gap: 10px; align-items: center;
+      padding: 8px 24px; background: #161b22;
+      border-bottom: 1px solid #30363d;
+    }
+
+    /* Partial-exit dot indicator on open positions */
+    .partial-dot {
+      display: inline-block; width: 6px; height: 6px;
+      border-radius: 50%; background: #3fb950;
+      margin-left: 4px;
+    }
+
     /* News & earnings grid */
     .info-grid {
       display: grid;
@@ -442,6 +476,17 @@
     <div class="card-value purple" id="profit-factor">—</div>
     <div class="card-sub">wins ÷ losses gross</div>
   </div>
+</div>
+
+<!-- ── Control bar ────────────────────────────────────────────────────────── -->
+<div class="controls-bar">
+  <button class="btn-force-close" id="btn-force-close" onclick="confirmForceClose()">
+    🛑 Force Close All
+  </button>
+  <button class="btn-pause" id="btn-pause" onclick="togglePause()">⏸ Pause New Trades</button>
+  <span style="margin-left:auto; font-size:11px; color:#6e7681;" id="connection-status">
+    ● connecting...
+  </span>
 </div>
 
 <!-- ── Macro Risk Banner ────────────────────────────────────────────────── -->
@@ -947,16 +992,24 @@
     } else {
       openBody.innerHTML = openTrades.map(t => {
         const upnl = parseFloat(t.unrealized_pnl || 0);
+        const partialPnl = parseFloat(t.realized_partial_pnl || 0);
+        const tiers = (t.tier_hits || []).length;
+        const partialBadge = tiers > 0
+          ? ` <span class="partial-dot" title="${tiers} trim(s) executed · banked ${partialPnl>=0?'+':''}$${partialPnl.toFixed(2)}"></span>`
+          : '';
+        const qtyDisplay = t.asset_type === 'option' && t.original_contracts && t.original_contracts !== t.contracts
+          ? `${t.contracts}c <small style="color:#6e7681">/ ${t.original_contracts}c</small>`
+          : qtyCell(t);
         return `<tr>
-          <td class="ticker">${t.symbol}</td>
+          <td class="ticker">${t.symbol}${partialBadge}</td>
           <td class="center">${typeCell(t)}</td>
           <td class="center">${detailCell(t)}</td>
-          <td class="right">${qtyCell(t)}</td>
+          <td class="right">${qtyDisplay}</td>
           <td class="right">${fmtMoney(t.entry_price)}</td>
           <td class="right">${fmtMoney(t.current_price)}</td>
           <td class="right" style="color:#6e7681">${fmtMoney(t.stop_price)}</td>
           <td class="right" style="color:#6e7681">${fmtMoney(t.target_price)}</td>
-          <td class="right ${pnlClass(upnl)}">${fmtMoney(upnl, true)}</td>
+          <td class="right ${pnlClass(upnl)}">${fmtMoney(upnl, true)}${partialPnl !== 0 ? ` <small class="${pnlClass(partialPnl)}">(+${fmtMoney(partialPnl)})</small>` : ''}</td>
           <td class="center">${fmtTime(t.entry_time)}</td>
         </tr>`;
       }).join('');
@@ -1332,18 +1385,104 @@
   }
 
   // ── Data loading ──────────────────────────────────────────────────────────
+  // Two modes:
+  //   (A) Page served by the bot's HTTP server → fast 1s polling via /api/data
+  //   (B) Page opened as a file:// URL          → reload dashboard_data.js
+  //                                              every 2s as a fallback
 
-  function loadData() {
+  const HAS_SERVER = window.location.protocol.startsWith('http');
+  const API_BASE   = HAS_SERVER ? window.location.origin : '';
+  let consecutiveErrors = 0;
+
+  async function loadDataHttp() {
+    try {
+      const r = await fetch(API_BASE + '/api/data', { cache: 'no-store' });
+      if (!r.ok) throw new Error('http ' + r.status);
+      const data = await r.json();
+      window.DASHBOARD_DATA = data;
+      render(data);
+      consecutiveErrors = 0;
+      document.getElementById('connection-status').innerHTML =
+        '<span class="green">●</span> live · ' + new Date().toLocaleTimeString();
+    } catch (e) {
+      consecutiveErrors++;
+      if (consecutiveErrors > 3) {
+        document.getElementById('connection-status').innerHTML =
+          '<span class="red">●</span> bot offline';
+      }
+    }
+  }
+
+  function loadDataFile() {
     const old = document.getElementById('data-script');
     if (old) old.remove();
     const s = document.createElement('script');
     s.id = 'data-script';
     s.src = 'dashboard_data.js?t=' + Date.now();
-    s.onload = () => { if (window.DASHBOARD_DATA) render(window.DASHBOARD_DATA); };
+    s.onload = () => {
+      if (window.DASHBOARD_DATA) {
+        render(window.DASHBOARD_DATA);
+        document.getElementById('connection-status').innerHTML =
+          '<span class="yellow">●</span> file mode · ' + new Date().toLocaleTimeString();
+      }
+    };
     s.onerror = () => {
-      document.getElementById('last-updated').textContent = 'Bot not running — start main.py to see live data';
+      document.getElementById('connection-status').innerHTML =
+        '<span class="red">●</span> no data file';
     };
     document.head.appendChild(s);
+  }
+
+  function loadData() {
+    if (HAS_SERVER) loadDataHttp();
+    else            loadDataFile();
+  }
+
+  // ── Force-close & pause controls ──────────────────────────────────────────
+
+  async function confirmForceClose() {
+    if (!HAS_SERVER) {
+      alert('Open dashboard at http://localhost:8765 to use force-close.');
+      return;
+    }
+    const openCount = (window.DASHBOARD_DATA?.open_positions || []).length;
+    const msg = openCount === 0
+      ? 'No open positions right now. Send close-all anyway?'
+      : `Force-close ALL ${openCount} open position(s) at market right now?`;
+    if (!confirm(msg)) return;
+
+    const btn = document.getElementById('btn-force-close');
+    btn.disabled = true;
+    btn.textContent = 'Closing...';
+    try {
+      const r = await fetch(API_BASE + '/api/close-all', { method: 'POST' });
+      const j = await r.json();
+      console.log('Close-all response:', j);
+    } catch (e) {
+      alert('Failed: ' + e.message);
+    } finally {
+      setTimeout(() => {
+        btn.disabled = false;
+        btn.innerHTML = '🛑 Force Close All';
+      }, 3000);
+    }
+  }
+
+  let isPaused = false;
+  async function togglePause() {
+    if (!HAS_SERVER) {
+      alert('Open dashboard at http://localhost:8765 to use pause.');
+      return;
+    }
+    const ep = isPaused ? '/api/resume' : '/api/pause';
+    try {
+      await fetch(API_BASE + ep, { method: 'POST' });
+      isPaused = !isPaused;
+      const btn = document.getElementById('btn-pause');
+      btn.textContent = isPaused ? '▶ Resume Trading' : '⏸ Pause New Trades';
+    } catch (e) {
+      alert('Failed: ' + e.message);
+    }
   }
 
   // ── CSV export ────────────────────────────────────────────────────────────
@@ -1376,7 +1515,8 @@
 
   // ── Boot ──────────────────────────────────────────────────────────────────
   loadData();
-  setInterval(loadData, 30000);
+  // Fast refresh when served by bot (HTTP); slower for file:// to avoid spinning the disk
+  setInterval(loadData, HAS_SERVER ? 1000 : 5000);
 </script>
 </body>
 </html>

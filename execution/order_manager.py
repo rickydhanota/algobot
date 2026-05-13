@@ -49,7 +49,12 @@ class ActiveTrade:
     # Options-specific
     option_type: Optional[str] = None    # 'call' | 'put'
     strike: Optional[float] = None
-    contracts: Optional[int] = None      # number of contracts
+    contracts: Optional[int] = None      # CURRENT remaining contracts
+    # Trimming state (populated by ExitManager)
+    original_contracts: Optional[int] = None    # at entry
+    tier_hits: List[int] = field(default_factory=list)
+    partial_exits: List[dict] = field(default_factory=list)
+    realized_partial_pnl: float = 0.0
 
     @property
     def unrealized_pnl(self) -> float:
@@ -168,6 +173,7 @@ class OrderManager:
                 option_type=setup.option_type,
                 strike=setup.strike,
                 contracts=contracts,
+                original_contracts=contracts,
             )
             self.active[trade_id] = trade
             self.risk.open_positions += 1
@@ -220,6 +226,48 @@ class OrderManager:
             )
         except Exception as e:
             log.error(f'[{trade.symbol}] Close failed: {e}')
+
+    def _partial_close_option(self, trade: ActiveTrade, qty: int, reason: str):
+        """Partially close an options position (sell `qty` contracts)."""
+        if trade.asset_type != 'option' or trade.contracts is None:
+            return
+        qty = min(qty, trade.contracts)
+        if qty <= 0:
+            return
+        try:
+            req = MarketOrderRequest(
+                symbol=trade.symbol,
+                qty=qty,
+                side=OrderSide.SELL,
+                time_in_force=TimeInForce.DAY,
+            )
+            self._client.submit_order(req)
+        except Exception as e:
+            log.error(f'[{trade.symbol}] Partial close failed: {e}')
+            return
+
+        # Update trade state
+        # Estimate exit price from latest price tracked externally; if absent
+        # we approximate via the entry+target midpoint. Best-effort book-keeping.
+        approx_exit = trade.target_price if trade.target_price else trade.entry_price * 1.20
+        partial_pnl = (approx_exit - trade.entry_price) * qty * 100
+        trade.realized_partial_pnl += partial_pnl
+        trade.partial_exits.append({
+            'qty':       qty,
+            'price':     approx_exit,
+            'reason':    reason,
+            'pnl':       round(partial_pnl, 2),
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        })
+        trade.contracts -= qty
+        trade.shares = trade.contracts * 100
+        log.info(
+            f'[{trade.symbol}] TRIM {qty} contracts ({reason}) → '
+            f'{trade.contracts} remaining; partial P&L ≈ ${partial_pnl:+.2f}'
+        )
+
+        # Bank the partial P&L day-level
+        self.risk.record_daily_pnl(partial_pnl)
 
     def close_all(self):
         """EOD: close all open positions."""

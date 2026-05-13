@@ -44,7 +44,9 @@ from strategy.risk_manager import RiskManager
 from strategy.stock_strategy import StockStrategy
 from strategy.options_strategy import OptionsStrategy
 from execution.order_manager import OrderManager, ActiveTrade
+from execution.exit_manager import ExitManager
 from performance.tracker import PerformanceTracker
+from dashboard_server import DashboardServer
 from news.alpaca_news import AlpacaNewsFeed
 from news.earnings import EarningsCalendar, IPOCalendar
 from news.sentiment import score_articles, score_text
@@ -89,7 +91,9 @@ class TradingBot:
         self.stock_strategy = StockStrategy()
         self.options_strategy = OptionsStrategy()
         self.orders = OrderManager(self.risk)
+        self.exit_manager = ExitManager(self.orders)
         self.tracker = PerformanceTracker()
+        self.dashboard_server = DashboardServer(self)
 
         # News & calendars
         self.news = AlpacaNewsFeed()
@@ -101,6 +105,8 @@ class TradingBot:
 
         self._traded_today: Set[str] = set()
         self._running = False
+        self._paused = False                     # set by dashboard /api/pause
+        self._force_close_requested = False      # set by dashboard /api/close-all
         self._phase = 'premarket'
         self._bars_cache = {}
         self._live_prices: Dict[str, float] = {}
@@ -297,7 +303,25 @@ class TradingBot:
             elif priority_sig and priority_sig.is_moderate:
                 priority_boost = 5
 
-        # ── Stock setup
+        # ── For priority option-favorite symbols (SPY/SPX/TSLA), prefer
+        # options when volume is healthy — these names are bread-and-butter
+        # options plays with deep liquidity.
+        prefer_options = (
+            sym in PRIORITY_SYMBOLS
+            and self.use_options
+            and volume_state is not None
+            and volume_state.is_healthy
+        )
+
+        if prefer_options:
+            chain = self.market_data.get_option_chain(sym)
+            if chain:
+                opt_setup = self.options_strategy.evaluate(sym, chain, tech, tape_signal)
+                if opt_setup and opt_setup.is_valid:
+                    opt_setup.score = min(100, opt_setup.score + priority_boost)
+                    return {'type': 'option', 'setup': opt_setup, 'tech': tech, 'tape': tape_signal}
+
+        # ── Stock setup (fallback or non-priority symbols)
         stock_setup = self.stock_strategy.evaluate(tech, tape_signal)
         if stock_setup:
             intel_boost = min(
@@ -425,6 +449,12 @@ class TradingBot:
                 await asyncio.sleep(30)
                 continue
 
+            # ── Force close-all request from dashboard?
+            if self._force_close_requested:
+                log.warning('🛑 Force close-all in progress')
+                self.orders.close_all()
+                self._force_close_requested = False
+
             # ── Active trading
             allowed, reason = self.risk.is_trading_allowed()
             if not allowed:
@@ -436,6 +466,16 @@ class TradingBot:
             self._refresh_news_if_due()
             self._refresh_macro_if_due()
             self.orders.check_exits(self._live_prices)
+
+            # Tiered trimming + tape-aware dynamic stops (options only)
+            decisions = self.exit_manager.process(self._live_prices, self.priority_tape)
+            for d in decisions:
+                log.info(f'[exit] {d.action}={d.quantity} ({d.reason}) pnl={d.pnl_pct*100:+.1f}%')
+
+            # If paused, skip new entries but keep managing existing
+            if self._paused:
+                await asyncio.sleep(5)
+                continue
 
             # Scan watchlist for setups
             for sym in self.watchlist:
@@ -460,8 +500,11 @@ class TradingBot:
                     trade = self.orders.place_options_trade(setup)
                     if trade:
                         self._traded_today.add(sym)
+                        # Register underlying so dynamic stop can read its tape
+                        self.exit_manager.register_underlying(trade.trade_id, sym)
 
-            await asyncio.sleep(30)
+            # Faster loop iteration for snappier trimming/stops
+            await asyncio.sleep(5)
 
     def _record_closed_on_exit(self, trade: ActiveTrade, score: int, rvol: float, imb: float):
         """Record closed trades into tracker AND adaptive learner."""
@@ -638,6 +681,7 @@ class TradingBot:
                 'option_type':   t.option_type,
                 'strike':        t.strike,
                 'contracts':     t.contracts,
+                'original_contracts': getattr(t, 'original_contracts', None),
                 'direction':     t.direction,
                 'shares':        t.shares,
                 'entry_price':   t.entry_price,
@@ -646,6 +690,9 @@ class TradingBot:
                 'stop_price':    t.stop_price,
                 'target_price':  t.target_price,
                 'unrealized_pnl': round(upnl, 2),
+                'realized_partial_pnl': round(getattr(t, 'realized_partial_pnl', 0), 2),
+                'partial_exits': getattr(t, 'partial_exits', []),
+                'tier_hits':     getattr(t, 'tier_hits', []),
                 'realized_pnl':  t.realized_pnl,
                 'outcome':       t.status,
                 'entry_time':    t.entry_time.isoformat() if t.entry_time else None,
@@ -706,6 +753,13 @@ class TradingBot:
         logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
         log.info('=== AlgoBot starting ===')
+
+        # Dashboard HTTP server (force-close button, live polling)
+        try:
+            await self.dashboard_server.start()
+        except Exception as e:
+            log.warning(f'Dashboard server failed to start: {e}')
+
         self._load_bars()
 
         # One-shot refresh of all news/intel feeds at startup so we have
@@ -743,7 +797,7 @@ class TradingBot:
             else:
                 while self._running:
                     self._write_html_data()
-                    await asyncio.sleep(30)
+                    await asyncio.sleep(2)    # snappy refresh for the dashboard server
         except asyncio.CancelledError:
             pass
         finally:

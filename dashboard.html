@@ -471,6 +471,7 @@
 <div id="topbar">
   <h1>ALGOBOT</h1>
   <span id="phase-badge">—</span>
+  <span id="mode-badge" class="pill" style="background:#3d1f6033;color:#bc8cff;border:1px solid #8b5cf6;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700;letter-spacing:1px;">⚡ OPTIONS FOCUS</span>
   <span id="last-updated">Waiting for bot data...</span>
 </div>
 
@@ -977,6 +978,12 @@
 
     const phaseEl = document.getElementById('phase-badge');
     phaseEl.textContent = (data.phase || '—').toUpperCase();
+
+    // Mode pill
+    const modeEl = document.getElementById('mode-badge');
+    if (modeEl) {
+      modeEl.textContent = data.options_only ? '⚡ OPTIONS-ONLY' : '⚡ OPTIONS-FIRST (stock fallback)';
+    }
 
     const genAt = data.generated_at ? fmtTime(data.generated_at) + ' PT' : 'unknown';
     document.getElementById('last-updated').textContent = `Updated: ${genAt}`;

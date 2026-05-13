@@ -326,46 +326,78 @@ class TradingBot:
             elif priority_sig and priority_sig.is_moderate:
                 priority_boost = 5
 
-        # ── For priority option-favorite symbols (SPY/SPX/TSLA), prefer
-        # options when volume is healthy — these names are bread-and-butter
-        # options plays with deep liquidity.
-        prefer_options = (
-            sym in PRIORITY_SYMBOLS
-            and self.use_options
-            and volume_state is not None
-            and volume_state.is_healthy
-        )
+        # ────────────────────────────────────────────────────────────────────
+        # OPTIONS-FIRST EVALUATION
+        # The bot is an options trader. Every symbol tries options first.
+        # Stocks are computed as directional context but only entered when
+        # OPTIONS_ONLY_MODE is False AND options aren't viable.
+        # ────────────────────────────────────────────────────────────────────
 
-        if prefer_options:
+        # Compute the underlying directional signal via the stock strategy.
+        # This determines whether the options play is bullish or bearish and
+        # gives us a quality score for the underlying move.
+        underlying_setup = self.stock_strategy.evaluate(tech, tape_signal)
+
+        # ── PRIMARY PATH: try options first ──────────────────────────────────
+        if self.use_options:
             chain = self.market_data.get_option_chain(sym)
             if chain:
                 opt_setup = self.options_strategy.evaluate(sym, chain, tech, tape_signal)
                 if opt_setup and opt_setup.is_valid:
-                    opt_setup.score = min(100, opt_setup.score + priority_boost)
+                    # Stack all bonuses on options score
+                    intel_boost = min(
+                        config.INTEL_SCORE_BOOST_MAX,
+                        self.intel.score_boost(sym, 'long' if opt_setup.option_type == 'call' else 'short'),
+                    )
+                    opt_setup.score = min(
+                        100,
+                        opt_setup.score + priority_boost + score_adj + intel_boost,
+                    )
+                    if score_adj > 0:
+                        opt_setup.notes.append(f'news+{score_adj}')
+                    if priority_boost > 0:
+                        opt_setup.notes.append(f'priority+{priority_boost}')
+                    if intel_boost > 0:
+                        opt_setup.notes.append(f'smartmoney+{intel_boost}')
+
+                    # Log the options signal for adaptive learning
+                    self.adaptive.record_signal(
+                        signal_id=f'{sym}-options_{opt_setup.option_type}-{int(opt_setup.timestamp.timestamp())}',
+                        symbol=sym,
+                        strategy=f'options_{opt_setup.option_type}',
+                        score=opt_setup.score,
+                        imbalance=tape_signal.imbalance if tape_signal else 0.0,
+                        rvol=tech.rvol if tech else 0.0,
+                        confluence_score=priority_sig.confluence_score if priority_sig else 0,
+                        direction='long' if opt_setup.option_type == 'call' else 'short',
+                    )
                     return {'type': 'option', 'setup': opt_setup, 'tech': tech, 'tape': tape_signal}
 
-        # ── Stock setup (fallback or non-priority symbols)
-        stock_setup = self.stock_strategy.evaluate(tech, tape_signal)
-        if stock_setup:
+        # ── No viable options. In options-only mode, stop here. ──────────────
+        if config.OPTIONS_ONLY_MODE:
+            if underlying_setup:
+                log.debug(
+                    f'[{sym}] Underlying signal valid ({underlying_setup.strategy} '
+                    f'score={underlying_setup.score}) but no viable options — skipping (OPTIONS_ONLY)'
+                )
+            return None
+
+        # ── FALLBACK PATH: stock trade (only when OPTIONS_ONLY_MODE = False) ─
+        if underlying_setup:
+            stock_setup = underlying_setup
             intel_boost = min(
                 config.INTEL_SCORE_BOOST_MAX,
                 self.intel.score_boost(sym, stock_setup.direction),
             )
             stock_setup.score = min(100, stock_setup.score + score_adj + priority_boost + intel_boost)
-            if score_adj > 0:
-                stock_setup.notes.append(f'news+{score_adj}')
-            if priority_boost > 0:
-                stock_setup.notes.append(f'priority+{priority_boost}')
-            if intel_boost > 0:
-                stock_setup.notes.append(f'smartmoney+{intel_boost}')
+            if score_adj > 0:    stock_setup.notes.append(f'news+{score_adj}')
+            if priority_boost:   stock_setup.notes.append(f'priority+{priority_boost}')
+            if intel_boost:      stock_setup.notes.append(f'smartmoney+{intel_boost}')
 
-            # Adaptive threshold per (symbol, strategy)
             adj = self.adaptive.threshold_adjustment(sym, stock_setup.strategy)
-            min_required = config.MIN_SIGNAL_SCORE + adj
-            if stock_setup.score < min_required:
+            if stock_setup.score < config.MIN_SIGNAL_SCORE + adj:
                 return None
 
-            # Log the signal that fired (outcome recorded later when trade closes)
             self.adaptive.record_signal(
                 signal_id=f'{sym}-{stock_setup.strategy}-{int(stock_setup.timestamp.timestamp())}',
                 symbol=sym,
@@ -377,15 +409,6 @@ class TradingBot:
                 direction=stock_setup.direction,
             )
             return {'type': 'stock', 'setup': stock_setup, 'tech': tech, 'tape': tape_signal}
-
-        # ── Options setup (priority names benefit most here)
-        if self.use_options:
-            chain = self.market_data.get_option_chain(sym)
-            if chain:
-                opt_setup = self.options_strategy.evaluate(sym, chain, tech, tape_signal)
-                if opt_setup and opt_setup.is_valid:
-                    opt_setup.score = min(100, opt_setup.score + priority_boost)
-                    return {'type': 'option', 'setup': opt_setup, 'tech': tech, 'tape': tape_signal}
 
         return None
 
@@ -753,6 +776,7 @@ class TradingBot:
         data = {
             'generated_at':    now.isoformat(),
             'phase':           self._phase,
+            'options_only':    config.OPTIONS_ONLY_MODE,
             'equity':          self.risk.account_size,
             'daily_pnl':       round(self.risk.daily_pnl, 2),
             'win_rate':        round(stats.win_rate, 4),

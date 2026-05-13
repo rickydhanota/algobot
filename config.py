@@ -36,6 +36,14 @@ RSI_OVERBOUGHT = 65
 RSI_OVERSOLD = 35
 VOLUME_MA_PERIOD = 20
 
+# ── Trading mode ──────────────────────────────────────────────────────────────
+# When True, the bot trades options exclusively across the whole watchlist.
+# Stocks are NEVER opened by the bot — but stock signals are still computed
+# (used as directional context) and stock-related data still appears on the
+# dashboard for awareness. Set False if you want stock fallback when no
+# viable options contract exists.
+OPTIONS_ONLY_MODE = True
+
 # ── Options parameters ────────────────────────────────────────────────────────
 OPT_DTE_MIN = 7
 OPT_DTE_MAX = 21

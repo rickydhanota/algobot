@@ -73,6 +73,11 @@ def market_phase(now: datetime) -> str:
     return 'closed'
 
 
+# Day-trade-only policy: force-close all positions before market close
+# so nothing gets held overnight.
+EOD_CLOSE_TIME_ET = (15, 50)   # 3:50 PM Eastern — 10 min before market close
+
+
 class TradingBot:
     def __init__(self, watchlist: List[str], use_options: bool = True):
         # Ensure SPY and TSLA are always in the watchlist (SPX is proxied from SPY)
@@ -216,6 +221,24 @@ class TradingBot:
             self._last_intel_fetch = now_utc
         except Exception as e:
             log.warning(f'Intel refresh failed: {e}')
+
+    def _check_eod_close(self):
+        """
+        Day-trade-only policy: force-close everything still open after 3:50 PM ET.
+        Idempotent — calling repeatedly is fine; close_all() only acts on 'open'
+        trades. We log only when there are actually positions to close.
+        """
+        now = et_now()
+        if (now.hour, now.minute) < EOD_CLOSE_TIME_ET:
+            return
+        open_trades = self.orders.get_open_trades()
+        if not open_trades:
+            return
+        log.warning(
+            f'⏰ EOD force-close ({now.strftime("%H:%M ET")}): closing '
+            f'{len(open_trades)} position(s) to honour day-trade-only policy'
+        )
+        self.orders.close_all()
 
     def _apply_macro_risk(self):
         """Translate MacroRisk into risk-manager state."""
@@ -449,7 +472,8 @@ class TradingBot:
                 # Only manage existing positions, no new trades
                 self._update_account()
                 self.orders.check_exits(self._live_prices)
-                await asyncio.sleep(30)
+                self._check_eod_close()      # day-trade-only enforcement
+                await asyncio.sleep(15)
                 continue
 
             # ── Force close-all request from dashboard?
@@ -469,6 +493,7 @@ class TradingBot:
             self._refresh_news_if_due()
             self._refresh_macro_if_due()
             self.orders.check_exits(self._live_prices)
+            self._check_eod_close()    # honours day-trade-only policy
 
             # Tiered trimming + tape-aware dynamic stops (options only)
             decisions = self.exit_manager.process(

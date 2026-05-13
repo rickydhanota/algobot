@@ -47,6 +47,11 @@ TAPE_FLIP_THRESHOLD = 0.40      # opposite-direction imbalance triggers exit
 TAPE_AGAINST_CONF_MIN = 40      # at soft stop, tape confluence ≥ this against us = exit
 TAPE_AGAINST_IMBALANCE_MIN = 0.30
 
+# Volume-aware trim acceleration (protects runners when momentum fades)
+VOLUME_TRIM_RATE_THRESHOLD = 0.70   # rate_ratio below this = "weakening"
+VOLUME_TRIM_TAPE_CONF_THRESHOLD = 30 # confluence below this + neutral dir = "tape fading"
+VOLUME_TRIM_BUFFER_PCT = 0.05       # need pnl > last_tier + 5% before accelerating
+
 
 @dataclass
 class ExitDecision:
@@ -88,8 +93,16 @@ class ExitManager:
 
             pnl_pct = (current - trade.entry_price) / trade.entry_price
 
-            # 1. Tiered trimming
+            # 1. Natural tiered trimming (profit thresholds)
             decision = self._maybe_trim(trade, current, pnl_pct)
+            if decision:
+                decisions.append(decision)
+                continue
+
+            # 1b. Volume-aware acceleration (runner protection)
+            decision = self._maybe_volume_trim(
+                trade, current, pnl_pct, priority_tape, volume_monitor,
+            )
             if decision:
                 decisions.append(decision)
                 continue
@@ -142,6 +155,112 @@ class ExitManager:
                 log.error(f'[{trade.symbol}] Trim failed: {e}')
                 return None
         return None
+
+    # ── Volume-aware runner protection ───────────────────────────────────────
+
+    def _maybe_volume_trim(
+        self,
+        trade,
+        current: float,
+        pnl_pct: float,
+        priority_tape,
+        volume_monitor,
+    ) -> Optional[ExitDecision]:
+        """
+        Accelerate the next trim tier when volume or tape weakens while
+        we're in profit (runner protection).
+
+        Only fires when:
+          • Trade is profitable (pnl > 0)
+          • At least one natural tier has fired (i.e. it's a "runner")
+          • Pnl is at least 5pp past the last hit tier (gives the trade room)
+          • Volume rate dropped below 70% of normal
+            OR underlying tape lost direction/confluence
+        """
+        if pnl_pct <= 0:
+            return None
+        if not trade.tier_hits:
+            return None  # natural tier 1 must fire first
+
+        # Find next unhit tier
+        next_idx = None
+        for idx, _ in enumerate(TRIM_TIERS):
+            if idx not in trade.tier_hits:
+                next_idx = idx
+                break
+        if next_idx is None:
+            return None
+
+        # Require buffer past last hit tier so we don't immediately fire
+        # tier N+1 the moment tier N completes
+        last_hit_threshold = max(TRIM_TIERS[i][0] for i in trade.tier_hits)
+        if pnl_pct < last_hit_threshold + VOLUME_TRIM_BUFFER_PCT:
+            return None
+
+        # Read volume and tape state
+        underlying = self._underlying.get(trade.trade_id) or self._derive_underlying(trade.symbol)
+        vol_weak  = False
+        tape_weak = False
+        vol_label  = '—'
+        tape_label = '—'
+
+        if volume_monitor and underlying:
+            try:
+                vol = volume_monitor.analyze(underlying)
+                if vol and vol.rate_ratio < VOLUME_TRIM_RATE_THRESHOLD:
+                    vol_weak = True
+                    vol_label = f'rate {vol.rate_ratio:.2f}×'
+            except Exception:
+                pass
+
+        if priority_tape and underlying:
+            try:
+                tape = priority_tape.analyze(underlying)
+                if tape:
+                    our_dir = 'buy' if trade.option_type == 'call' else 'sell'
+                    # Weak = lost direction OR confluence dropped low
+                    if tape.direction != our_dir and tape.confluence_score < VOLUME_TRIM_TAPE_CONF_THRESHOLD + 20:
+                        tape_weak = True
+                        tape_label = f'dir={tape.direction}, conf={tape.confluence_score}'
+                    elif tape.confluence_score < VOLUME_TRIM_TAPE_CONF_THRESHOLD:
+                        tape_weak = True
+                        tape_label = f'conf={tape.confluence_score}'
+            except Exception:
+                pass
+
+        if not (vol_weak or tape_weak):
+            return None
+
+        # Fire the next tier early
+        threshold, frac = TRIM_TIERS[next_idx]
+        qty = max(1, math.floor(trade.original_contracts * frac))
+        remaining = trade.contracts or 0
+        if remaining <= 1:
+            trade.tier_hits.append(next_idx)
+            return None
+        qty = min(qty, remaining - 1)  # always preserve runner
+        if qty <= 0:
+            trade.tier_hits.append(next_idx)
+            return None
+
+        reasons = []
+        if vol_weak:  reasons.append(f'vol weak ({vol_label})')
+        if tape_weak: reasons.append(f'tape weak ({tape_label})')
+        why = ', '.join(reasons)
+
+        try:
+            self.orders._partial_close_option(trade, qty, f'vol_trim_t{next_idx+1}')
+            trade.tier_hits.append(next_idx)
+            return ExitDecision(
+                trade_id=trade.trade_id,
+                action='trim',
+                quantity=qty,
+                reason=f'EARLY tier{next_idx+1} @ {pnl_pct*100:.0f}% — {why}',
+                pnl_pct=pnl_pct,
+            )
+        except Exception as e:
+            log.error(f'[{trade.symbol}] Volume trim failed: {e}')
+            return None
 
     # ── Dynamic stops ────────────────────────────────────────────────────────
 

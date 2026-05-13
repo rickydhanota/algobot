@@ -35,7 +35,9 @@ import config
 from data.alpaca_client import AlpacaClients
 from data.market_data import MarketDataManager
 from signals.tape_reader import TapeReader
+from signals.priority_tape import PriorityTapeReader, PRIORITY_SYMBOLS
 from signals.technical import TechnicalAnalyzer
+from learning.adaptive import AdaptiveLearner
 from strategy.risk_manager import RiskManager
 from strategy.stock_strategy import StockStrategy
 from strategy.options_strategy import OptionsStrategy
@@ -68,11 +70,15 @@ def market_phase(now: datetime) -> str:
 
 class TradingBot:
     def __init__(self, watchlist: List[str], use_options: bool = True):
-        self.watchlist = watchlist
+        # Ensure SPY and TSLA are always in the watchlist (SPX is proxied from SPY)
+        wl = list(dict.fromkeys(list(watchlist) + ['SPY', 'TSLA']))
+        self.watchlist = wl
         self.use_options = use_options
 
         self.market_data = MarketDataManager()
         self.tape = TapeReader()
+        self.priority_tape = PriorityTapeReader()
+        self.adaptive = AdaptiveLearner()
         self.analyzer = TechnicalAnalyzer()
         self.risk = RiskManager()
         self.stock_strategy = StockStrategy()
@@ -111,6 +117,9 @@ class TradingBot:
             vwap = self.market_data.update_vwap(sym, price, size)
             self._live_vwap[sym] = vwap
             self.tape.record_trade(sym, price, size)
+            # Enhanced reader (SPY trades also populate SPX proxy buffer)
+            if sym in PRIORITY_SYMBOLS or sym == 'SPY':
+                self.priority_tape.record_trade(sym, price, size)
 
         stream.subscribe_trades(on_trade, *self.watchlist)
         await stream.run()
@@ -244,22 +253,51 @@ class TradingBot:
 
         tape_signal = self.tape.analyze(sym)
 
+        # ── Priority tape boost for SPY / SPX / TSLA
+        priority_sig = None
+        priority_boost = 0
+        if sym in PRIORITY_SYMBOLS:
+            priority_sig = self.priority_tape.analyze(sym)
+            if priority_sig and priority_sig.is_strong:
+                priority_boost = 10
+            elif priority_sig and priority_sig.is_moderate:
+                priority_boost = 5
+
         # ── Stock setup
         stock_setup = self.stock_strategy.evaluate(tech, tape_signal)
         if stock_setup:
-            stock_setup.score = min(100, stock_setup.score + score_adj)
+            stock_setup.score = min(100, stock_setup.score + score_adj + priority_boost)
             if score_adj > 0:
                 stock_setup.notes.append(f'news+{score_adj}')
-            if stock_setup.score < config.MIN_SIGNAL_SCORE:
+            if priority_boost > 0:
+                stock_setup.notes.append(f'priority+{priority_boost}')
+
+            # Adaptive threshold per (symbol, strategy)
+            adj = self.adaptive.threshold_adjustment(sym, stock_setup.strategy)
+            min_required = config.MIN_SIGNAL_SCORE + adj
+            if stock_setup.score < min_required:
                 return None
+
+            # Log the signal that fired (outcome recorded later when trade closes)
+            self.adaptive.record_signal(
+                signal_id=f'{sym}-{stock_setup.strategy}-{int(stock_setup.timestamp.timestamp())}',
+                symbol=sym,
+                strategy=stock_setup.strategy,
+                score=stock_setup.score,
+                imbalance=tape_signal.imbalance if tape_signal else 0.0,
+                rvol=stock_setup.rvol,
+                confluence_score=priority_sig.confluence_score if priority_sig else 0,
+                direction=stock_setup.direction,
+            )
             return {'type': 'stock', 'setup': stock_setup, 'tech': tech, 'tape': tape_signal}
 
-        # ── Options setup (if enabled and underlying has a bias)
+        # ── Options setup (priority names benefit most here)
         if self.use_options:
             chain = self.market_data.get_option_chain(sym)
             if chain:
                 opt_setup = self.options_strategy.evaluate(sym, chain, tech, tape_signal)
                 if opt_setup and opt_setup.is_valid:
+                    opt_setup.score = min(100, opt_setup.score + priority_boost)
                     return {'type': 'option', 'setup': opt_setup, 'tech': tech, 'tape': tape_signal}
 
         return None
@@ -335,11 +373,15 @@ class TradingBot:
             await asyncio.sleep(30)
 
     def _record_closed_on_exit(self, trade: ActiveTrade, score: int, rvol: float, imb: float):
-        """Background check: record trades once they close."""
+        """Record closed trades into tracker AND adaptive learner."""
         closed = self.orders.get_closed_trades()
         for t in closed:
-            if t.realized_pnl is not None:
-                self.tracker.record(t, score=score, rvol=rvol, tape_imbalance=imb)
+            if t.realized_pnl is None:
+                continue
+            self.tracker.record(t, score=score, rvol=rvol, tape_imbalance=imb)
+            # Feed outcome to adaptive learner — uses our signal_id format
+            sig_id = f'{t.symbol}-{t.strategy}-{int(t.entry_time.timestamp())}'
+            self.adaptive.record_outcome(sig_id, t.realized_pnl)
 
     # ── Dashboard ─────────────────────────────────────────────────────────────
 
@@ -557,6 +599,8 @@ class TradingBot:
             'sentiment':       self._sentiment_cache,
             'macro_news':      self.macro_feeds.all(limit=20),
             'macro_risk':      self.macro_risk.to_dict(),
+            'priority_tape':   self.priority_tape.snapshot_all(),
+            'adaptive_stats':  self.adaptive.all_stats(),
         }
 
         js = f'window.DASHBOARD_DATA = {json.dumps(data, indent=2)};\n'

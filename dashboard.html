@@ -310,6 +310,62 @@
 
     @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 
+    /* Priority tape panel */
+    .priority-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+    }
+    @media (max-width: 900px) { .priority-grid { grid-template-columns: 1fr; } }
+
+    .priority-card {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 14px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .priority-card.bullish { border-left: 3px solid #3fb950; }
+    .priority-card.bearish { border-left: 3px solid #f85149; }
+    .priority-card.neutral { border-left: 3px solid #6e7681; }
+
+    .priority-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .priority-symbol { font-size: 18px; font-weight: 800; color: #e6edf3; letter-spacing: 1px; }
+    .priority-conf {
+      font-size: 11px; font-weight: 700;
+      padding: 3px 9px; border-radius: 4px;
+    }
+    .priority-conf.strong   { background:#1a3a2233; color:#3fb950; border:1px solid #2ea04355; }
+    .priority-conf.moderate { background:#3a3122;   color:#e3b341; border:1px solid #e3b34155; }
+    .priority-conf.weak     { background:#21262d;   color:#8b949e; border:1px solid #30363d; }
+
+    .priority-metric {
+      display: flex; justify-content: space-between;
+      font-size: 12px; padding: 3px 0;
+      border-bottom: 1px solid #21262d;
+    }
+    .priority-metric:last-child { border-bottom: none; }
+    .priority-metric-label { color: #8b949e; }
+    .priority-metric-value { color: #c9d1d9; font-weight: 600; }
+
+    .flag {
+      display: inline-block; padding: 1px 7px; border-radius: 3px;
+      font-size: 10px; font-weight: 700;
+    }
+    .flag.alert { background:#3a1a1a; color:#f85149; border:1px solid #f85149; }
+
+    /* Adaptive learning table */
+    .learn-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .learn-table th { padding: 6px 10px; color: #8b949e; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.4px; font-size: 10px; }
+    .learn-table td { padding: 6px 10px; border-top: 1px solid #21262d; }
+
     /* Macro news category badges */
     .cat-fed       { background:#1f3a5f33; color:#58a6ff; border:1px solid #1f6feb55; }
     .cat-president { background:#3d1f6033; color:#bc8cff; border:1px solid #8b5cf655; }
@@ -422,6 +478,64 @@
         </div>
       </div>
       <canvas id="pnl-chart"></canvas>
+    </div>
+  </div>
+
+  <!-- Priority Tape: SPY / SPX / TSLA enhanced -->
+  <div>
+    <div class="section-header">
+      <span class="section-title">Priority Tape — SPY / SPX / TSLA</span>
+      <span class="badge">enhanced reader</span>
+    </div>
+    <div class="priority-grid" id="priority-grid">
+      <div class="priority-card neutral">
+        <div class="priority-header">
+          <span class="priority-symbol">SPY</span>
+          <span class="priority-conf weak">—</span>
+        </div>
+        <div style="color:#6e7681;font-size:12px;font-style:italic;">Waiting for tape data...</div>
+      </div>
+      <div class="priority-card neutral">
+        <div class="priority-header">
+          <span class="priority-symbol">SPX</span>
+          <span class="priority-conf weak">—</span>
+        </div>
+        <div style="color:#6e7681;font-size:12px;font-style:italic;">Proxied from SPY</div>
+      </div>
+      <div class="priority-card neutral">
+        <div class="priority-header">
+          <span class="priority-symbol">TSLA</span>
+          <span class="priority-conf weak">—</span>
+        </div>
+        <div style="color:#6e7681;font-size:12px;font-style:italic;">Waiting for tape data...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Adaptive Learning: per (symbol, strategy) performance -->
+  <div>
+    <div class="section-header">
+      <span class="section-title">Adaptive Learning — Rolling Performance</span>
+      <span class="badge" id="adaptive-count">0</span>
+    </div>
+    <div class="table-wrap">
+      <table class="learn-table">
+        <thead>
+          <tr>
+            <th>Symbol</th>
+            <th>Strategy</th>
+            <th class="right">Trades</th>
+            <th class="right">Wins</th>
+            <th class="right">Losses</th>
+            <th class="right">Win Rate</th>
+            <th class="right">Total P&amp;L</th>
+            <th class="right">Threshold Adj</th>
+          </tr>
+        </thead>
+        <tbody id="adaptive-body">
+          <tr class="empty-row"><td colspan="8">No closed trades yet — learning starts after first trades close</td></tr>
+        </tbody>
+      </table>
     </div>
   </div>
 
@@ -744,6 +858,12 @@
     // Chart
     buildChart(data.historical_trades || [], currentRange);
 
+    // Priority tape (SPY/SPX/TSLA)
+    renderPriorityTape(data.priority_tape || {});
+
+    // Adaptive learning stats
+    renderAdaptiveStats(data.adaptive_stats || []);
+
     // Macro risk banner
     renderMacroBanner(data.macro_risk || {});
 
@@ -806,6 +926,110 @@
         </tr>`;
       }).join('');
     }
+  }
+
+  // ── Priority tape (SPY/SPX/TSLA) ──────────────────────────────────────────
+
+  function renderPriorityTape(snapshot) {
+    const symbols = ['SPY', 'SPX', 'TSLA'];
+    const grid = document.getElementById('priority-grid');
+    grid.innerHTML = symbols.map(sym => {
+      const d = snapshot[sym];
+      if (!d) {
+        return `
+          <div class="priority-card neutral">
+            <div class="priority-header">
+              <span class="priority-symbol">${sym}</span>
+              <span class="priority-conf weak">—</span>
+            </div>
+            <div style="color:#6e7681;font-size:12px;font-style:italic;">
+              ${sym === 'SPX' ? 'Proxied from SPY' : 'Waiting for tape data...'}
+            </div>
+          </div>`;
+      }
+      const dir = d.direction || 'neutral';
+      const cardCls = dir === 'buy' ? 'bullish' : (dir === 'sell' ? 'bearish' : 'neutral');
+      const conf = d.confluence_score || 0;
+      const confCls = conf >= 70 ? 'strong' : (conf >= 50 ? 'moderate' : 'weak');
+      const arrow = dir === 'buy' ? '▲' : (dir === 'sell' ? '▼' : '◆');
+      const dirColor = dir === 'buy' ? 'green' : (dir === 'sell' ? 'red' : '');
+      const trendArrow = d.cvd_trend === 'up' ? '↑' : (d.cvd_trend === 'down' ? '↓' : '→');
+      const trendColor = d.cvd_trend === 'up' ? 'green' : (d.cvd_trend === 'down' ? 'red' : '');
+      const fmtImb = v => (v >= 0 ? '+' : '') + v.toFixed(2);
+      const sweepFlag = d.sweep_detected
+        ? `<span class="flag alert">SWEEP ${(d.sweep_direction||'').toUpperCase()}</span>`
+        : '';
+
+      return `
+        <div class="priority-card ${cardCls}">
+          <div class="priority-header">
+            <span class="priority-symbol">
+              ${sym} <span class="${dirColor}" style="font-size:14px;">${arrow}</span>
+            </span>
+            <span class="priority-conf ${confCls}">${conf}/100</span>
+          </div>
+          <div>
+            <div class="priority-metric">
+              <span class="priority-metric-label">Imbalance (100t)</span>
+              <span class="priority-metric-value ${d.imbalance_100 >= 0 ? 'green' : 'red'}">${fmtImb(d.imbalance_100)}</span>
+            </div>
+            <div class="priority-metric">
+              <span class="priority-metric-label">Imbalance (500t)</span>
+              <span class="priority-metric-value ${d.imbalance_500 >= 0 ? 'green' : 'red'}">${fmtImb(d.imbalance_500)}</span>
+            </div>
+            <div class="priority-metric">
+              <span class="priority-metric-label">Imbalance (1000t)</span>
+              <span class="priority-metric-value ${d.imbalance_1000 >= 0 ? 'green' : 'red'}">${fmtImb(d.imbalance_1000)}</span>
+            </div>
+            <div class="priority-metric">
+              <span class="priority-metric-label">CVD</span>
+              <span class="priority-metric-value">
+                ${d.cvd.toLocaleString()} <span class="${trendColor}">${trendArrow}</span>
+              </span>
+            </div>
+            <div class="priority-metric">
+              <span class="priority-metric-label">Block prints (100t)</span>
+              <span class="priority-metric-value">${d.block_count} (${(d.block_volume_pct*100).toFixed(0)}%)</span>
+            </div>
+            <div class="priority-metric">
+              <span class="priority-metric-label">Sample</span>
+              <span class="priority-metric-value">${d.sample_count.toLocaleString()} trades</span>
+            </div>
+            ${sweepFlag ? `<div style="margin-top:6px;">${sweepFlag}</div>` : ''}
+          </div>
+        </div>`;
+    }).join('');
+  }
+
+  // ── Adaptive learning stats ───────────────────────────────────────────────
+
+  function renderAdaptiveStats(stats) {
+    document.getElementById('adaptive-count').textContent = stats.length;
+    const body = document.getElementById('adaptive-body');
+    if (!stats.length) {
+      body.innerHTML = '<tr class="empty-row"><td colspan="8">No closed trades yet — learning starts after first trades close</td></tr>';
+      return;
+    }
+    body.innerHTML = stats.map(s => {
+      const wr = (s.win_rate * 100).toFixed(0) + '%';
+      const wrCls = s.win_rate >= 0.6 ? 'green' : (s.win_rate < 0.45 ? 'red' : 'yellow');
+      const pnlCls = s.total_pnl >= 0 ? 'green' : 'red';
+      const adj = s.threshold_adjustment;
+      const adjStr = adj > 0
+        ? `<span class="red">+${adj} (tighter)</span>`
+        : (adj < 0 ? `<span class="green">${adj} (looser)</span>` : `<span style="color:#6e7681">0</span>`);
+      return `
+        <tr>
+          <td class="ticker">${s.symbol}</td>
+          <td style="color:#8b949e">${s.strategy}</td>
+          <td class="right">${s.sample_size}</td>
+          <td class="right green">${s.wins}</td>
+          <td class="right red">${s.losses}</td>
+          <td class="right ${wrCls}">${wr}</td>
+          <td class="right ${pnlCls}">${fmtMoney(s.total_pnl, true)}</td>
+          <td class="right">${adjStr}</td>
+        </tr>`;
+    }).join('');
   }
 
   // ── Macro renderers ───────────────────────────────────────────────────────

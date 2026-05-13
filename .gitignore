@@ -17,6 +17,7 @@ env/
 
 # Bot runtime artifacts
 trades.db
+learning.db
 bot.log
 dashboard_data.js
 

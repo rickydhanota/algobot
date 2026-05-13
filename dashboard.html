@@ -608,6 +608,68 @@
     </div>
   </div>
 
+  <!-- Open Positions -->
+  <div>
+    <div class="section-header">
+      <span class="section-title">Open Positions</span>
+      <span class="badge" id="open-count">0</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Ticker</th>
+            <th class="center">Type</th>
+            <th class="center">Detail</th>
+            <th class="right">Qty</th>
+            <th class="right">Entry</th>
+            <th class="right">Current</th>
+            <th class="right">Stop</th>
+            <th class="right">Target</th>
+            <th class="right">Unreal P&amp;L</th>
+            <th class="center">Opened (PT)</th>
+            <th class="center">Action</th>
+          </tr>
+        </thead>
+        <tbody id="open-body">
+          <tr class="empty-row"><td colspan="11">No open positions</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Closed Trades -->
+  <div>
+    <div class="section-header">
+      <span class="section-title">Today's Closed Trades</span>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <span class="badge" id="closed-count">0</span>
+        <button class="btn-export" onclick="exportCSV()">↓ Export CSV</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Ticker</th>
+            <th class="center">Type</th>
+            <th class="center">Detail</th>
+            <th class="right">Qty</th>
+            <th class="right">Entry</th>
+            <th class="right">Exit</th>
+            <th class="right">P&amp;L</th>
+            <th class="center">Result</th>
+            <th class="center">Opened (PT)</th>
+            <th class="center">Closed (PT)</th>
+          </tr>
+        </thead>
+        <tbody id="closed-body">
+          <tr class="empty-row"><td colspan="10">No closed trades today</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
   <!-- Smart Money + Congress Watch -->
   <div>
     <div class="section-header">
@@ -698,67 +760,6 @@
     </div>
   </div>
 
-  <!-- Open Positions -->
-  <div>
-    <div class="section-header">
-      <span class="section-title">Open Positions</span>
-      <span class="badge" id="open-count">0</span>
-    </div>
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Ticker</th>
-            <th class="center">Type</th>
-            <th class="center">Detail</th>
-            <th class="right">Qty</th>
-            <th class="right">Entry</th>
-            <th class="right">Current</th>
-            <th class="right">Stop</th>
-            <th class="right">Target</th>
-            <th class="right">Unreal P&amp;L</th>
-            <th class="center">Opened (PT)</th>
-            <th class="center">Action</th>
-          </tr>
-        </thead>
-        <tbody id="open-body">
-          <tr class="empty-row"><td colspan="11">No open positions</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </div>
-
-  <!-- Closed Trades -->
-  <div>
-    <div class="section-header">
-      <span class="section-title">Today's Closed Trades</span>
-      <div style="display:flex;gap:8px;align-items:center;">
-        <span class="badge" id="closed-count">0</span>
-        <button class="btn-export" onclick="exportCSV()">↓ Export CSV</button>
-      </div>
-    </div>
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Ticker</th>
-            <th class="center">Type</th>
-            <th class="center">Detail</th>
-            <th class="right">Qty</th>
-            <th class="right">Entry</th>
-            <th class="right">Exit</th>
-            <th class="right">P&amp;L</th>
-            <th class="center">Result</th>
-            <th class="center">Opened (PT)</th>
-            <th class="center">Closed (PT)</th>
-          </tr>
-        </thead>
-        <tbody id="closed-body">
-          <tr class="empty-row"><td colspan="10">No closed trades today</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </div>
 
 </main>
 

@@ -435,6 +435,28 @@ class TradingBot:
             return None
         session_adj = session_mod.score_adjustment(session_window)
 
+        # Hard gate: no midday entries (71% of today's midday signals were neutral)
+        if config.BLOCK_MIDDAY_ENTRIES and session_window == 'midday':
+            self._track_rejection(sym, 'midday_blocked', 'no entries during midday')
+            return None
+
+        # Hard gate: no entries after late cutoff (need time for exit logic)
+        now_et = et_now()
+        cutoff_h, cutoff_m = config.LATE_ENTRY_CUTOFF_ET
+        if (now_et.hour, now_et.minute) >= (cutoff_h, cutoff_m):
+            self._track_rejection(sym, 'late_cutoff', f'past {cutoff_h}:{cutoff_m:02d} ET')
+            return None
+
+        # Hard gate: volume must be healthy (≥0.8× normal)
+        if config.REQUIRE_VOLUME_HEALTHY:
+            v = self.volume.analyze(sym)
+            if v and (not v.is_healthy or v.rate_ratio < config.VOLUME_HEALTHY_FLOOR):
+                self._track_rejection(
+                    sym, 'volume_gate',
+                    f'rate {v.rate_ratio:.2f}× < {config.VOLUME_HEALTHY_FLOOR}',
+                )
+                return None
+
         # News & earnings filter — gate BEFORE expensive analysis
         allowed, score_adj, reason = self._news_filter(sym)
         if not allowed:
@@ -525,6 +547,18 @@ class TradingBot:
                     sym, chain, tech, tape_signal,
                     dte_min=dte_min, dte_max=dte_max,
                 )
+
+                # Hard gate: tape direction MUST match the option's direction.
+                # Trade WITH the tape, never against it.
+                if opt_setup and config.REQUIRE_TAPE_ALIGNMENT:
+                    our_dir = 'buy' if opt_setup.option_type == 'call' else 'sell'
+                    tape_dir = tape_signal.direction if tape_signal else None
+                    if tape_dir != our_dir:
+                        self._track_rejection(
+                            sym, 'tape_misaligned',
+                            f'wanted {our_dir} tape, got {tape_dir}',
+                        )
+                        opt_setup = None
                 if opt_setup and opt_setup.is_valid:
                     # Stack all bonuses on options score
                     intel_boost = min(

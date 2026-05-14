@@ -12,7 +12,14 @@ ACCOUNT_SIZE = 3000.0
 MAX_RISK_PER_TRADE_PCT = 0.02     # 2% per trade = $60 on $3k
 MAX_DAILY_LOSS_PCT = 0.05         # stop trading after 5% down = $150
 MAX_CONCURRENT_POSITIONS = 5
-MIN_SIGNAL_SCORE = 68             # 0-100, only enter A/B setups
+MIN_SIGNAL_SCORE = 75             # raised from 68 — today's losers scored 69-77
+
+# Hard gates — apply BEFORE scoring, not just as score boosts
+REQUIRE_TAPE_ALIGNMENT = True     # signal direction MUST match underlying tape direction
+REQUIRE_VOLUME_HEALTHY = True     # volume rate must be ≥ 0.8× for all symbols
+VOLUME_HEALTHY_FLOOR = 0.8
+BLOCK_MIDDAY_ENTRIES = True       # no new trades during midday window — 71% neutral today
+LATE_ENTRY_CUTOFF_ET = (15, 30)   # no new trades after 3:30 PM ET — need time for exits
 
 # ── Session timing (all Eastern) ─────────────────────────────────────────────
 ORB_CAPTURE_MINUTES = 15          # capture open range first 15 min

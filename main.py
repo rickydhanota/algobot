@@ -465,10 +465,12 @@ class TradingBot:
 
         tape_signal = self.tape.analyze(sym)
 
+        # Always read volume state — used by DTE selector and exit logic
+        volume_state = self.volume.analyze(sym)
+
         # ── Priority tape boost for SPY / SPX / TSLA
         priority_sig = None
         priority_boost = 0
-        volume_state = None
         if sym in PRIORITY_SYMBOLS:
             # Hard volume gate: skip thin or stale tape outright
             ok, why = self.volume.is_tradeable(sym)
@@ -476,7 +478,6 @@ class TradingBot:
                 log.debug(f'[{sym}] Volume gate: {why}')
                 self._track_rejection(sym, 'volume_gate', why)
                 return None
-            volume_state = self.volume.analyze(sym)
             priority_sig = self.priority_tape.analyze(sym)
             if priority_sig and priority_sig.is_strong:
                 priority_boost = 10
@@ -512,7 +513,18 @@ class TradingBot:
         if self.use_options:
             chain = self.market_data.get_option_chain(sym)
             if chain:
-                opt_setup = self.options_strategy.evaluate(sym, chain, tech, tape_signal)
+                # Dynamic DTE selection based on conditions
+                # power+strong+elevated→0-7  |  power+moderate→1-14  |  else→7-30
+                dte_min, dte_max = session_mod.dte_preference(
+                    session_window=session_window,
+                    tape_strength=tape_signal.strength if tape_signal else None,
+                    tape_confluence=priority_sig.confluence_score if priority_sig else None,
+                    vol_rate=volume_state.rate_ratio if volume_state else None,
+                )
+                opt_setup = self.options_strategy.evaluate(
+                    sym, chain, tech, tape_signal,
+                    dte_min=dte_min, dte_max=dte_max,
+                )
                 if opt_setup and opt_setup.is_valid:
                     # Stack all bonuses on options score
                     intel_boost = min(

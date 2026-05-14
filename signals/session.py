@@ -69,6 +69,46 @@ def label(window: str) -> str:
     }.get(window, window.upper())
 
 
+def dte_preference(
+    session_window: str,
+    tape_strength: float = None,
+    tape_confluence: int = None,
+    vol_rate: float = None,
+) -> tuple:
+    """
+    Pick the DTE band the chain filter should use, based on current
+    market conditions.
+
+    Logic:
+      • POWER window + strong tape + elevated volume
+          → 0–7 DTE  (max gamma for fast moves, low theta exposure)
+      • POWER window + moderate signals
+          → 1–14 DTE (same-week weeklies, some gamma cushion)
+      • MIDDAY or weaker conditions
+          → 7–30 DTE (further-out for theta protection on slow setups)
+
+    Returns (dte_min, dte_max) — both inclusive.
+    """
+    is_power = session_window in ('power_open', 'power_close')
+
+    strong_tape = (
+        (tape_strength is not None and tape_strength >= 0.5)
+        or (tape_confluence is not None and tape_confluence >= 70)
+    )
+    moderate_tape = (
+        (tape_strength is not None and tape_strength >= 0.3)
+        or (tape_confluence is not None and tape_confluence >= 50)
+    )
+    elevated_vol = vol_rate is not None and vol_rate >= 1.0
+    healthy_vol  = vol_rate is None or vol_rate >= 0.7
+
+    if is_power and strong_tape and elevated_vol:
+        return (0, 7)        # max-gamma window
+    if is_power and (moderate_tape or elevated_vol) and healthy_vol:
+        return (1, 14)       # same-week + next-week
+    return (7, 30)            # safer further-out for slow conditions
+
+
 def to_dict(now_et: datetime) -> dict:
     """Dashboard-friendly snapshot."""
     w = current_window(now_et)

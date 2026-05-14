@@ -57,12 +57,11 @@ THESIS_SUSTAINED_SECONDS = 60       # ...continuously for 60s before exit fires
 THESIS_MIN_CHECKS = 6               # AND at least 6 consecutive bad samples (~30s @ 5s loop)
 THESIS_PROGRESS_LOG_EVERY = 3       # log progression every N checks
 
-# "Profit protect" — data-driven full-exit when the trade is in profit but
-# tape/volume support is fading. Specifically handles two cases the trim
-# ladder can't cover:
-#   1. Single-contract positions (trims round to 0 contracts)
-#   2. Multi-contract positions that have exhausted all trim tiers
-PROFIT_PROTECT_MIN_PCT = 0.05         # only engage when at least +5%
+# "Profit protect" — data-driven full-exit for the +5%..+20% gap zone
+# before the first natural trim tier. Above +20% the data-driven tier trim
+# takes over. Below +5% we treat noise as noise.
+PROFIT_PROTECT_MIN_PCT = 0.05         # engage above +5%
+PROFIT_PROTECT_MAX_PCT = 0.20         # above +20% tier trim takes over
 PROFIT_PROTECT_VOL_THRESHOLD = 0.70   # volume below 70% normal = warning
 PROFIT_PROTECT_SUSTAINED_SECONDS = 30 # 30s sustained (faster than 60s thesis)
 PROFIT_PROTECT_MIN_CHECKS = 3         # 3+ consecutive bad samples (≈15s @ 5s loop)
@@ -130,22 +129,19 @@ class ExitManager:
                 decisions.append(decision)
                 continue
 
-            # 1. Natural tiered trimming (profit thresholds)
-            decision = self._maybe_trim(trade, current, pnl_pct)
-            if decision:
-                decisions.append(decision)
-                continue
-
-            # 1b. Volume-aware acceleration (runner protection)
-            decision = self._maybe_volume_trim(
-                trade, current, pnl_pct, priority_tape, volume_monitor,
+            # 1. Data-driven tiered trimming — only trims when tape/volume
+            # support has faded. Strong support → defer the trim, let runner run.
+            decision = self._maybe_trim(
+                trade, current, pnl_pct,
+                priority_tape=priority_tape,
+                volume_monitor=volume_monitor,
+                fallback_tape=fallback_tape,
             )
             if decision:
                 decisions.append(decision)
                 continue
 
-            # 1c. Profit-protect full exit — for positions in profit where the
-            # trim ladder cannot help (single contract or tiers exhausted)
+            # 1b. Profit-protect — handles the +5% to +20% gap before first tier
             decision = self._maybe_profit_protect(
                 trade, current, pnl_pct, priority_tape, volume_monitor, fallback_tape,
             )
@@ -336,22 +332,11 @@ class ExitManager:
 
         tid = trade.trade_id
 
-        # Only protect meaningful profits
-        if pnl_pct < PROFIT_PROTECT_MIN_PCT:
+        # Only protect inside the +5%..+20% gap zone. Above +20% the
+        # data-driven tier trim takes over.
+        if pnl_pct < PROFIT_PROTECT_MIN_PCT or pnl_pct >= PROFIT_PROTECT_MAX_PCT:
             self._profit_watches.pop(tid, None)
             return None
-
-        # If the trim ladder could fire naturally, let it. We only act
-        # when (a) single contract or (b) every tier already hit.
-        if trade.contracts and trade.contracts > 1:
-            next_unhit_threshold = None
-            for idx, (threshold, _) in enumerate(TRIM_TIERS):
-                if idx not in trade.tier_hits and pnl_pct >= threshold:
-                    next_unhit_threshold = threshold
-                    break
-            if next_unhit_threshold is not None:
-                self._profit_watches.pop(tid, None)
-                return None
 
         underlying = self._underlying.get(tid) or self._derive_underlying(trade.symbol)
         our_dir = 'buy' if trade.option_type == 'call' else 'sell'
@@ -512,44 +497,143 @@ class ExitManager:
         """Combined list of all in-progress defensive exit watches."""
         return self.active_thesis_watches() + self.active_profit_watches()
 
-    def _maybe_trim(self, trade, current: float, pnl_pct: float) -> Optional[ExitDecision]:
+    def _maybe_trim(
+        self,
+        trade,
+        current: float,
+        pnl_pct: float,
+        priority_tape=None,
+        volume_monitor=None,
+        fallback_tape=None,
+    ) -> Optional[ExitDecision]:
+        """
+        Data-driven tier trimming.
+
+        At each natural profit threshold (+20%, +35%, +60%, +100%) we ONLY
+        trim when the tape/volume support has started fading. As long as
+        tape direction matches our position with strong confluence AND
+        volume is healthy, we DEFER the trim and let the runner run.
+
+        For single-contract / very small positions, "trim" becomes a full
+        exit since fractional trims would round to zero — so the same
+        data-driven philosophy applies regardless of position size.
+        """
         # Init metadata if missing (older trades from previous versions)
         if not hasattr(trade, 'tier_hits') or trade.tier_hits is None:
             trade.tier_hits = []
         if not getattr(trade, 'original_contracts', None):
             trade.original_contracts = trade.contracts or max(1, trade.shares // 100)
 
+        # Find first unhit tier we've crossed
+        next_idx = None
+        next_threshold = None
+        next_frac = None
         for idx, (threshold, frac) in enumerate(TRIM_TIERS):
             if idx in trade.tier_hits:
                 continue
-            if pnl_pct < threshold:
-                continue
-            # Hit this tier
-            qty = max(1, math.floor(trade.original_contracts * frac))
-            remaining = trade.contracts or 0
-            if remaining <= 1:
-                # Down to runner already — don't trim, mark hit so we don't loop
-                trade.tier_hits.append(idx)
-                continue
-            qty = min(qty, remaining - 1)  # always keep ≥ 1 contract as runner
-            if qty <= 0:
-                trade.tier_hits.append(idx)
-                continue
+            if pnl_pct >= threshold:
+                next_idx = idx
+                next_threshold = threshold
+                next_frac = frac
+                break
+        if next_idx is None:
+            return None
 
+        # ── Read data before deciding ────────────────────────────────────────
+        underlying = self._underlying.get(trade.trade_id) or self._derive_underlying(trade.symbol)
+        our_dir = 'buy' if trade.option_type == 'call' else 'sell'
+
+        vol_rate = None
+        if volume_monitor and underlying:
             try:
-                self.orders._partial_close_option(trade, qty, f'trim_t{idx+1}')
-                trade.tier_hits.append(idx)
+                v = volume_monitor.analyze(underlying)
+                if v: vol_rate = v.rate_ratio
+            except Exception:
+                pass
+
+        tape_dir = None
+        tape_conf = None
+        if priority_tape and underlying:
+            try:
+                t = priority_tape.analyze(underlying)
+                if t:
+                    tape_dir = t.direction
+                    tape_conf = t.confluence_score
+            except Exception:
+                pass
+        if tape_dir is None and fallback_tape and underlying:
+            try:
+                t = fallback_tape.analyze(underlying)
+                if t:
+                    tape_dir = t.direction
+                    tape_conf = int((t.strength or 0) * 100)
+            except Exception:
+                pass
+
+        # Strong support = tape matches our direction with decent confluence
+        # AND volume healthy. If both, defer the trim — let it run.
+        tape_supports = (tape_dir == our_dir and (tape_conf is None or tape_conf >= 60))
+        vol_supports  = (vol_rate is None or vol_rate >= 0.7)
+
+        if tape_supports and vol_supports:
+            # Log occasionally so user sees the runner is being held intentionally
+            import time
+            log_key = f'_defer_log_{trade.trade_id}_{next_idx}'
+            now_ts = int(time.time())
+            if now_ts - getattr(self, log_key, 0) > 30:
+                log.info(
+                    f'[{trade.symbol}] @ {pnl_pct*100:+.1f}% past tier{next_idx+1} '
+                    f'({next_threshold*100:.0f}%) — DATA STILL SUPPORTS '
+                    f'(tape {tape_dir} conf={tape_conf}, vol {vol_rate}×) — letting it run'
+                )
+                setattr(self, log_key, now_ts)
+            return None
+
+        # ── Data has fled — execute the trim ─────────────────────────────────
+        remaining = trade.contracts or 0
+        if remaining <= 0:
+            return None
+
+        # Decide qty: for small positions, full exit. Otherwise fractional trim.
+        weakness = []
+        if not tape_supports: weakness.append(f'tape {tape_dir} conf={tape_conf}')
+        if not vol_supports:  weakness.append(f'vol {vol_rate:.2f}×')
+        why = ', '.join(weakness)
+
+        if remaining <= 2:
+            # Tiny position — full exit instead of fractional trim
+            try:
+                self.orders._close_trade(trade, current, f'data_exit_tier{next_idx+1}')
+                trade.tier_hits.append(next_idx)
                 return ExitDecision(
-                    trade_id=trade.trade_id,
-                    action='trim',
-                    quantity=qty,
-                    reason=f'tier{idx+1} @ {threshold*100:.0f}% gain',
+                    trade_id=trade.trade_id, action='stop', quantity=remaining,
+                    reason=(f'tier{next_idx+1} ({next_threshold*100:.0f}%) full exit '
+                            f'@ {pnl_pct*100:+.1f}% — {why}'),
                     pnl_pct=pnl_pct,
                 )
             except Exception as e:
-                log.error(f'[{trade.symbol}] Trim failed: {e}')
+                log.error(f'[{trade.symbol}] Full exit failed: {e}')
                 return None
-        return None
+
+        # Multi-contract — trim the planned fraction
+        qty = max(1, math.floor(trade.original_contracts * next_frac))
+        qty = min(qty, remaining - 1)  # keep ≥1 as runner
+        if qty <= 0:
+            trade.tier_hits.append(next_idx)
+            return None
+
+        try:
+            self.orders._partial_close_option(trade, qty, f'data_trim_t{next_idx+1}')
+            trade.tier_hits.append(next_idx)
+            return ExitDecision(
+                trade_id=trade.trade_id, action='trim', quantity=qty,
+                reason=(f'tier{next_idx+1} trim @ {pnl_pct*100:+.1f}% '
+                        f'(crossed {next_threshold*100:.0f}%) — {why}'),
+                pnl_pct=pnl_pct,
+            )
+        except Exception as e:
+            log.error(f'[{trade.symbol}] Trim failed: {e}')
+            return None
 
     # ── Volume-aware runner protection ───────────────────────────────────────
 

@@ -45,8 +45,10 @@ VOLUME_MA_PERIOD = 20
 OPTIONS_ONLY_MODE = True
 
 # ── Options parameters ────────────────────────────────────────────────────────
-OPT_DTE_MIN = 7
-OPT_DTE_MAX = 21
+# Outer DTE bounds — the bot picks the actual range dynamically per trade
+# based on session/tape/volume (see signals/session.py:dte_preference).
+OPT_DTE_MIN = 0           # 0DTE allowed (same-day)
+OPT_DTE_MAX = 45          # up to 45 DTE covers same-week, weekly, monthly
 OPT_DELTA_MIN = 0.25
 OPT_DELTA_MAX = 0.50
 OPT_VOI_THRESHOLD = 3.0           # unusual = volume/OI > 3×

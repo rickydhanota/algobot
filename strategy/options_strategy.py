@@ -106,6 +106,8 @@ class OptionsStrategy:
         chain: Optional[dict],
         tech: TechnicalSignal,
         tape: Optional[TapeSignal],
+        dte_min: Optional[int] = None,
+        dte_max: Optional[int] = None,
     ) -> Optional[OptionsSetup]:
         if chain is None:
             return None
@@ -120,7 +122,8 @@ class OptionsStrategy:
         opt_type = 'call' if direction == 'long' else 'put'
         spot = tech.last_price if tech else 0.0
         best = self._select_contract(
-            underlying, chain, opt_type, direction, underlying_score, spot_price=spot,
+            underlying, chain, opt_type, direction, underlying_score,
+            spot_price=spot, dte_min=dte_min, dte_max=dte_max,
         )
         return best
 
@@ -156,10 +159,16 @@ class OptionsStrategy:
         direction: str,
         underlying_score: int,
         spot_price: float = 0.0,
+        dte_min: Optional[int] = None,
+        dte_max: Optional[int] = None,
     ) -> Optional[OptionsSetup]:
         today = date.today()
         candidates = []
         expected_type = 'C' if opt_type == 'call' else 'P'
+
+        # Use overrides if provided (dynamic DTE selection), else config defaults
+        dte_lo = dte_min if dte_min is not None else config.OPT_DTE_MIN
+        dte_hi = dte_max if dte_max is not None else config.OPT_DTE_MAX
 
         for symbol, snap in chain.items():
             try:
@@ -173,7 +182,7 @@ class OptionsStrategy:
                     continue
 
                 dte = (expiry - today).days
-                if not (config.OPT_DTE_MIN <= dte <= config.OPT_DTE_MAX):
+                if not (dte_lo <= dte <= dte_hi):
                     continue
 
                 # Use real greeks if available, otherwise estimate from spot

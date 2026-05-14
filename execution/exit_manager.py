@@ -54,6 +54,8 @@ THESIS_PNL_LOW  = -0.15             # only fires inside this band...
 THESIS_PNL_HIGH = 0.20              # ...where no other exit logic operates
 THESIS_VOL_RATE_MAX = 0.50          # volume must be < 0.5× normal
 THESIS_SUSTAINED_SECONDS = 60       # ...continuously for 60s before exit fires
+THESIS_MIN_CHECKS = 6               # AND at least 6 consecutive bad samples (~30s @ 5s loop)
+THESIS_PROGRESS_LOG_EVERY = 3       # log progression every N checks
 
 # Volume-aware trim acceleration (protects runners when momentum fades)
 VOLUME_TRIM_RATE_THRESHOLD = 0.70   # rate_ratio below this = "weakening"
@@ -76,9 +78,11 @@ class ExitManager:
         # Underlying mapping for options (e.g., AAPL250117C00200000 → AAPL)
         # Populated when the option order is placed via `register_underlying`.
         self._underlying: Dict[str, str] = {}
-        # When did volume + tape first weaken for each trade?
-        # Used to require sustained weakness (not flicker) before thesis-broken exit
-        self._thesis_weak_since: Dict[str, 'datetime'] = {}
+        # Active thesis-broken watches: trade_id → state dict
+        # {'start': datetime, 'checks': int, 'last_vol': float, 'last_conf': int, 'last_pnl': float}
+        # Reset to empty whenever conditions recover — exit only fires when
+        # the watch survives every check between start and 60s elapsed.
+        self._thesis_watches: Dict[str, dict] = {}
 
     def register_underlying(self, trade_id: str, underlying: str):
         self._underlying[trade_id] = underlying
@@ -159,72 +163,132 @@ class ExitManager:
 
         tid = trade.trade_id
 
-        # Only operates in the gap zone
+        # Out of the gap zone → discard any active watch
         if not (THESIS_PNL_LOW < pnl_pct < THESIS_PNL_HIGH):
-            self._thesis_weak_since.pop(tid, None)
+            if tid in self._thesis_watches:
+                log.info(f'[{trade.symbol}] thesis watch ended — P&L left -15%..+20% zone')
+            self._thesis_watches.pop(tid, None)
             return None
 
         underlying = self._underlying.get(tid) or self._derive_underlying(trade.symbol)
+        now = datetime.now(timezone.utc)
 
-        # Read both indicators
+        # Re-read BOTH indicators from current tape/volume state
+        vol_rate = None
         vol_weak = False
-        vol_label = ''
         if volume_monitor and underlying:
             try:
                 v = volume_monitor.analyze(underlying)
-                if v and v.rate_ratio < THESIS_VOL_RATE_MAX:
-                    vol_weak = True
-                    vol_label = f'rate {v.rate_ratio:.2f}×'
+                if v:
+                    vol_rate = v.rate_ratio
+                    if v.rate_ratio < THESIS_VOL_RATE_MAX:
+                        vol_weak = True
             except Exception:
                 pass
 
+        tape_conf = None
+        tape_dir = None
         tape_not_supporting = False
-        tape_label = ''
         if priority_tape and underlying:
             try:
                 t = priority_tape.analyze(underlying)
                 if t:
+                    tape_dir = t.direction
+                    tape_conf = t.confluence_score
                     our_dir = 'buy' if trade.option_type == 'call' else 'sell'
                     if t.direction != our_dir:
                         tape_not_supporting = True
-                        tape_label = f'tape {t.direction} conf={t.confluence_score}'
             except Exception:
                 pass
 
-        # Need BOTH conditions to start/sustain the timer
+        # Either condition recovered → WIPE the watch (zero tolerance for flicker)
         if not (vol_weak and tape_not_supporting):
-            self._thesis_weak_since.pop(tid, None)
+            if tid in self._thesis_watches:
+                state = self._thesis_watches[tid]
+                log.info(
+                    f'[{trade.symbol}] thesis watch RESET after {state["checks"]} bad checks '
+                    f'({(now - state["start"]).total_seconds():.0f}s) — '
+                    f'now vol={vol_rate if vol_rate is not None else "?"} '
+                    f'tape={tape_dir or "?"} conf={tape_conf if tape_conf is not None else "?"}'
+                )
+                self._thesis_watches.pop(tid, None)
             return None
 
-        now = datetime.now(timezone.utc)
-        weak_since = self._thesis_weak_since.get(tid)
-        if weak_since is None:
-            self._thesis_weak_since[tid] = now
+        # Both conditions bad — start or extend the watch
+        state = self._thesis_watches.get(tid)
+        if state is None:
+            self._thesis_watches[tid] = {
+                'start':      now,
+                'checks':     1,
+                'last_vol':   vol_rate,
+                'last_conf':  tape_conf,
+                'last_pnl':   pnl_pct,
+                'symbol':     trade.symbol,
+                'underlying': underlying,
+            }
             log.info(
-                f'[{trade.symbol}] thesis watch started at {pnl_pct*100:+.1f}% '
-                f'({vol_label}, {tape_label}) — exit fires after {THESIS_SUSTAINED_SECONDS}s sustained'
+                f'[{trade.symbol}] 🔍 thesis watch START @ {pnl_pct*100:+.1f}% '
+                f'(vol {vol_rate:.2f}× < {THESIS_VOL_RATE_MAX}, tape {tape_dir} conf={tape_conf}) — '
+                f'need {THESIS_SUSTAINED_SECONDS}s + {THESIS_MIN_CHECKS} checks sustained'
             )
             return None
 
-        elapsed = (now - weak_since).total_seconds()
-        if elapsed < THESIS_SUSTAINED_SECONDS:
+        # Extend watch — record this check
+        state['checks']    += 1
+        state['last_vol']   = vol_rate
+        state['last_conf']  = tape_conf
+        state['last_pnl']   = pnl_pct
+        elapsed = (now - state['start']).total_seconds()
+
+        # Periodic progress log
+        if state['checks'] % THESIS_PROGRESS_LOG_EVERY == 0:
+            log.info(
+                f'[{trade.symbol}] thesis watch: {elapsed:.0f}/{THESIS_SUSTAINED_SECONDS}s, '
+                f'check {state["checks"]}/{THESIS_MIN_CHECKS} — still bad '
+                f'(vol {vol_rate:.2f}×, tape {tape_dir} conf={tape_conf}, pnl {pnl_pct*100:+.1f}%)'
+            )
+
+        # Need BOTH thresholds satisfied: enough time AND enough samples
+        if elapsed < THESIS_SUSTAINED_SECONDS or state['checks'] < THESIS_MIN_CHECKS:
             return None
 
-        # Sustained — exit
+        # Survived — exit
         try:
             self.orders._close_trade(trade, current, 'thesis_broken')
-            self._thesis_weak_since.pop(tid, None)
+            self._thesis_watches.pop(tid, None)
             return ExitDecision(
                 trade_id=tid,
                 action='stop',
                 quantity=trade.contracts or 0,
-                reason=(f'thesis broken at {pnl_pct*100:+.1f}%: {vol_label} + {tape_label} '
-                        f'sustained {elapsed:.0f}s'),
+                reason=(f'thesis broken @ {pnl_pct*100:+.1f}% — sustained {elapsed:.0f}s / '
+                        f'{state["checks"]} checks: vol {vol_rate:.2f}×, tape {tape_dir} conf={tape_conf}'),
                 pnl_pct=pnl_pct,
             )
         except Exception as e:
             log.error(f'[{trade.symbol}] Thesis-broken close failed: {e}')
             return None
+
+    def active_thesis_watches(self) -> List[dict]:
+        """Snapshot of in-progress thesis watches for dashboard display."""
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        out = []
+        for tid, s in self._thesis_watches.items():
+            elapsed = (now - s['start']).total_seconds()
+            out.append({
+                'trade_id':   tid,
+                'symbol':     s.get('symbol'),
+                'underlying': s.get('underlying'),
+                'elapsed_s':  round(elapsed, 1),
+                'required_s': THESIS_SUSTAINED_SECONDS,
+                'checks':     s['checks'],
+                'required_checks': THESIS_MIN_CHECKS,
+                'last_vol':   s.get('last_vol'),
+                'last_conf':  s.get('last_conf'),
+                'last_pnl':   s.get('last_pnl'),
+                'progress':   min(1.0, elapsed / THESIS_SUSTAINED_SECONDS),
+            })
+        return out
 
     def _maybe_trim(self, trade, current: float, pnl_pct: float) -> Optional[ExitDecision]:
         # Init metadata if missing (older trades from previous versions)

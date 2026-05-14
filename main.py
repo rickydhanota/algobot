@@ -892,6 +892,7 @@ class TradingBot:
             'session':         session_mod.to_dict(et_now()),
             'session_stats':   self.adaptive.session_stats(),
             'recent_rejections': list(self._rejections)[-40:][::-1],   # newest first
+            'thesis_watches':  self.exit_manager.active_thesis_watches(),
             'intel':           self.intel.dashboard_data(),
         }
 

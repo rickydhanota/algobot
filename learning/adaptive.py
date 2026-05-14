@@ -197,15 +197,114 @@ class AdaptiveLearner:
     ) -> int:
         """
         Returns points to add to MIN_SIGNAL_SCORE for this bucket.
-        If session_window is provided AND has ≥ MIN_SAMPLE_SIZE samples,
-        use the per-window adjustment. Otherwise fall back to overall.
+
+        Priority symbols (SPY/SPX/TSLA) adapt faster with a shorter
+        rolling window (15 trades vs 30) and a smaller minimum sample
+        floor (6 vs 10) so the bot can react quickly to their patterns.
         """
+        is_priority = symbol in ('SPY', 'SPX', 'TSLA')
+        last_n = 15 if is_priority else 30
+        min_sample = 6 if is_priority else MIN_SAMPLE_SIZE
+
         if session_window:
-            window_stats = self.bucket_stats(symbol, strategy, session_window=session_window)
-            if window_stats and window_stats.sample_size >= MIN_SAMPLE_SIZE:
+            window_stats = self.bucket_stats(symbol, strategy,
+                                             last_n=last_n,
+                                             session_window=session_window)
+            if window_stats and window_stats.sample_size >= min_sample:
                 return window_stats.threshold_adjustment
-        stats = self.bucket_stats(symbol, strategy)
-        return stats.threshold_adjustment if stats else 0
+        stats = self.bucket_stats(symbol, strategy, last_n=last_n)
+        if stats and stats.sample_size >= min_sample:
+            return stats.threshold_adjustment
+        return 0
+
+    # ── Pattern recognition ─────────────────────────────────────────────────
+
+    def symbol_pattern_summary(self, symbol: str, last_n: int = 100) -> dict:
+        """
+        Rich pattern stats for a symbol — win rates bucketed by confluence,
+        imbalance magnitude, RVOL, and session window. Lets us see exactly
+        what conditions have been winning for SPY/TSLA.
+        """
+        with self._conn() as c:
+            rows = c.execute('''
+                SELECT outcome, pnl, score, imbalance, rvol, confluence_score,
+                       direction, session_window
+                FROM signal_records
+                WHERE symbol = ? AND outcome IS NOT NULL
+                ORDER BY timestamp DESC
+                LIMIT ?
+            ''', (symbol, last_n)).fetchall()
+
+        if not rows:
+            return {'symbol': symbol, 'samples': 0}
+
+        wins = sum(1 for r in rows if r[0] == 'win')
+        losses = sum(1 for r in rows if r[0] == 'loss')
+        decided = wins + losses
+        if decided == 0:
+            return {'symbol': symbol, 'samples': 0}
+
+        # Buckets
+        conf_buckets = {'<50': [0,0], '50-69': [0,0], '70-89': [0,0], '90-100': [0,0]}
+        imb_buckets  = {'<0.2': [0,0], '0.2-0.4': [0,0], '0.4+': [0,0]}
+        session_buckets = {}
+        score_buckets = {'<70': [0,0], '70-79': [0,0], '80-89': [0,0], '90+': [0,0]}
+        direction_buckets = {'long': [0,0], 'short': [0,0]}
+
+        for outcome, pnl, score, imbalance, rvol, conf, direction, session in rows:
+            if outcome not in ('win', 'loss'):
+                continue
+            is_win = outcome == 'win'
+            ix = 0 if is_win else 1
+
+            c = conf or 0
+            if   c >= 90: conf_buckets['90-100'][ix] += 1
+            elif c >= 70: conf_buckets['70-89'][ix]  += 1
+            elif c >= 50: conf_buckets['50-69'][ix]  += 1
+            else:         conf_buckets['<50'][ix]    += 1
+
+            i = abs(imbalance or 0)
+            if   i >= 0.4: imb_buckets['0.4+'][ix]    += 1
+            elif i >= 0.2: imb_buckets['0.2-0.4'][ix] += 1
+            else:          imb_buckets['<0.2'][ix]    += 1
+
+            s = score or 0
+            if   s >= 90: score_buckets['90+'][ix]   += 1
+            elif s >= 80: score_buckets['80-89'][ix] += 1
+            elif s >= 70: score_buckets['70-79'][ix] += 1
+            else:         score_buckets['<70'][ix]   += 1
+
+            if direction in direction_buckets:
+                direction_buckets[direction][ix] += 1
+
+            sw = session or 'unknown'
+            if sw not in session_buckets:
+                session_buckets[sw] = [0, 0]
+            session_buckets[sw][ix] += 1
+
+        def fmt(bucket: dict) -> dict:
+            out = {}
+            for k, (w, l) in bucket.items():
+                total = w + l
+                out[k] = {
+                    'wins': w, 'losses': l, 'samples': total,
+                    'win_rate': round(w / total, 3) if total else 0.0,
+                }
+            return out
+
+        return {
+            'symbol':       symbol,
+            'samples':      decided,
+            'wins':         wins,
+            'losses':       losses,
+            'win_rate':     round(wins / decided, 3),
+            'total_pnl':    round(sum(r[1] or 0 for r in rows), 2),
+            'by_confluence': fmt(conf_buckets),
+            'by_imbalance':  fmt(imb_buckets),
+            'by_score':      fmt(score_buckets),
+            'by_session':    fmt(session_buckets),
+            'by_direction':  fmt(direction_buckets),
+        }
 
     def session_stats(self) -> List[dict]:
         """Per-session-window stats across all (symbol, strategy) pairs."""

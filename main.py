@@ -1090,6 +1090,8 @@ class TradingBot:
             'thesis_watches':  self.exit_manager.all_active_watches(),
             'shadow':          self.shadow.stats_overall(),
             'shadow_buckets':  self.shadow.stats_by_bucket()[:10],
+            'spy_patterns':    self.adaptive.symbol_pattern_summary('SPY'),
+            'tsla_patterns':   self.adaptive.symbol_pattern_summary('TSLA'),
             'intel':           self.intel.dashboard_data(),
         }
 

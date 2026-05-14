@@ -41,6 +41,7 @@ from signals.volume_monitor import VolumeMonitor
 from signals.entry_quality import EntryQualityChecker, MIN_QUALITY_TO_TRADE
 from signals import session as session_mod
 from learning.adaptive import AdaptiveLearner
+from learning.shadow import ShadowEvaluator
 from strategy.risk_manager import RiskManager
 from strategy.stock_strategy import StockStrategy
 from strategy.options_strategy import OptionsStrategy
@@ -92,6 +93,7 @@ class TradingBot:
         self.volume = VolumeMonitor()
         self.entry_quality = EntryQualityChecker()
         self.adaptive = AdaptiveLearner()
+        self.shadow = ShadowEvaluator()
         self.analyzer = TechnicalAnalyzer()
         self.risk = RiskManager()
         self.stock_strategy = StockStrategy()
@@ -491,6 +493,19 @@ class TradingBot:
         # gives us a quality score for the underlying move.
         underlying_setup = self.stock_strategy.evaluate(tech, tape_signal)
 
+        # SHADOW LEARNING: record this signal regardless of whether it leads
+        # to a real trade. We'll evaluate the outcome 30 min later from the
+        # underlying's actual price move — gives us learning data on quiet days.
+        if underlying_setup and tech and tech.last_price:
+            self.shadow.record(
+                symbol=sym,
+                strategy=underlying_setup.strategy,
+                score=underlying_setup.score,
+                direction=underlying_setup.direction,
+                session_window=session_window,
+                underlying_price=tech.last_price,
+            )
+
         # ── PRIMARY PATH: try options first ──────────────────────────────────
         if self.use_options:
             chain = self.market_data.get_option_chain(sym)
@@ -696,6 +711,7 @@ class TradingBot:
             self._refresh_macro_if_due()
             self._apply_macro_risk()        # refresh session-window multiplier each tick
             self._refresh_option_quotes()   # keep open-option prices fresh for P&L + stops
+            self.shadow.evaluate_pending(self._live_prices)   # score hypothetical outcomes
             self.orders.check_exits(self._live_prices)
             self._check_eod_close()    # honours day-trade-only policy
 
@@ -986,6 +1002,8 @@ class TradingBot:
             'session_stats':   self.adaptive.session_stats(),
             'recent_rejections': list(self._rejections)[-40:][::-1],   # newest first
             'thesis_watches':  self.exit_manager.active_thesis_watches(),
+            'shadow':          self.shadow.stats_overall(),
+            'shadow_buckets':  self.shadow.stats_by_bucket()[:10],
             'intel':           self.intel.dashboard_data(),
         }
 

@@ -182,6 +182,39 @@ class TradingBot:
         except Exception:
             pass
 
+    def _refresh_option_quotes(self):
+        """
+        Fetch the latest mid price for every open option position and
+        write it into self._live_prices keyed by the OCC symbol. Without
+        this, the trim ladder, dynamic stops, and dashboard P&L all read
+        stale entry prices because we don't stream individual contracts.
+        """
+        open_options = [
+            t for t in self.orders.get_open_trades() if t.asset_type == 'option'
+        ]
+        if not open_options:
+            return
+
+        try:
+            from alpaca.data.requests import OptionLatestQuoteRequest
+            client = AlpacaClients.option_hist()
+            if client is None:
+                return
+            symbols = list({t.symbol for t in open_options})
+            req = OptionLatestQuoteRequest(symbol_or_symbols=symbols)
+            quotes = client.get_option_latest_quote(req)
+            for sym, q in quotes.items():
+                bid = getattr(q, 'bid_price', 0) or 0
+                ask = getattr(q, 'ask_price', 0) or 0
+                if bid and ask:
+                    self._live_prices[sym] = (bid + ask) / 2.0
+                elif ask:
+                    self._live_prices[sym] = ask
+                elif bid:
+                    self._live_prices[sym] = bid
+        except Exception as e:
+            log.debug(f'Option quote refresh failed: {e}')
+
     def _refresh_news_if_due(self):
         """Refresh news every NEWS_FETCH_INTERVAL_MIN minutes."""
         now_utc = datetime.now(timezone.utc)
@@ -518,7 +551,9 @@ class TradingBot:
             if phase == 'closed':
                 # Market is closed — stop trading but KEEP the dashboard
                 # server alive so the user can review the session.
-                # User must Ctrl+C / kill the process to fully exit.
+                # Still refresh option quotes once a minute so dashboard
+                # reflects the most recent fills before/at the close.
+                self._refresh_option_quotes()
                 await asyncio.sleep(30)
                 continue
 
@@ -544,6 +579,7 @@ class TradingBot:
             if phase == 'closing':
                 # Only manage existing positions, no new trades
                 self._update_account()
+                self._refresh_option_quotes()
                 self.orders.check_exits(self._live_prices)
                 self._check_eod_close()      # day-trade-only enforcement
                 await asyncio.sleep(15)
@@ -566,6 +602,7 @@ class TradingBot:
             self._refresh_news_if_due()
             self._refresh_macro_if_due()
             self._apply_macro_risk()        # refresh session-window multiplier each tick
+            self._refresh_option_quotes()   # keep open-option prices fresh for P&L + stops
             self.orders.check_exits(self._live_prices)
             self._check_eod_close()    # honours day-trade-only policy
 

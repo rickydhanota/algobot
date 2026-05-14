@@ -84,7 +84,12 @@ REDUCE_SIZE_ON_HIGH_RISK = True    # use macro risk multiplier for position size
 
 # ── Default watchlist ─────────────────────────────────────────────────────────
 WATCHLIST = [
-    'SPY', 'QQQ', 'IWM',
-    'AAPL', 'TSLA', 'NVDA', 'MSFT', 'AMZN', 'META', 'GOOGL',
-    'AMD', 'PLTR', 'COIN', 'MSTR', 'SOFI',
+    # Priority — evaluated first every cycle (SPX proxied via SPY)
+    'SPY', 'TSLA',
+    # High-liquidity ETFs / mega-caps next
+    'QQQ', 'IWM', 'AAPL', 'NVDA', 'MSFT', 'AMD',
+    # Other mega-caps
+    'AMZN', 'META', 'GOOGL',
+    # High-IV individual names
+    'PLTR', 'COIN', 'MSTR', 'SOFI',
 ]

@@ -62,8 +62,13 @@ THESIS_PROGRESS_LOG_EVERY = 3       # log progression every N checks
 # sustained 45s + 5 checks. The trade thesis depends on directional pressure;
 # if pressure disappears, exit before the position drifts.
 PRESSURE_LOST_IMBALANCE_FLOOR = 0.15
-PRESSURE_LOST_SUSTAINED_SECONDS = 45
+PRESSURE_LOST_SUSTAINED_SECONDS = 45        # default for non-priority symbols
 PRESSURE_LOST_MIN_CHECKS = 5
+# Priority symbols (SPY/SPX/TSLA) react faster — they move quickly so
+# dead tape becomes meaningful sooner
+PRESSURE_LOST_SUSTAINED_SECONDS_PRIORITY = 30
+PRESSURE_LOST_MIN_CHECKS_PRIORITY = 4
+PRIORITY_UNDERLYINGS = ('SPY', 'SPX', 'TSLA')
 
 # "Profit protect" — data-driven full-exit for the +5%..+20% gap zone
 # before the first natural trim tier. Above +20% the data-driven tier trim
@@ -374,6 +379,11 @@ class ExitManager:
             self._pressure_watches.pop(tid, None)
             return None
 
+        # Priority symbols (SPY/TSLA) get the faster reaction window
+        is_priority = underlying in PRIORITY_UNDERLYINGS
+        req_secs = PRESSURE_LOST_SUSTAINED_SECONDS_PRIORITY if is_priority else PRESSURE_LOST_SUSTAINED_SECONDS
+        req_checks = PRESSURE_LOST_MIN_CHECKS_PRIORITY if is_priority else PRESSURE_LOST_MIN_CHECKS
+
         pressure_lost = (
             tape_dir == 'neutral'
             or abs(tape_imb) < PRESSURE_LOST_IMBALANCE_FLOOR
@@ -406,7 +416,7 @@ class ExitManager:
             log.info(
                 f'[{trade.symbol}] 🔻 pressure-lost watch START @ {pnl_pct*100:+.1f}% '
                 f'— tape {tape_dir} imb {tape_imb:+.2f} '
-                f'(need {PRESSURE_LOST_SUSTAINED_SECONDS}s + {PRESSURE_LOST_MIN_CHECKS} checks)'
+                f'(need {req_secs}s + {req_checks} checks{" — priority" if is_priority else ""})'
             )
             return None
 
@@ -417,7 +427,7 @@ class ExitManager:
         state['last_pnl']  = pnl_pct
         elapsed = (now - state['start']).total_seconds()
 
-        if elapsed < PRESSURE_LOST_SUSTAINED_SECONDS or state['checks'] < PRESSURE_LOST_MIN_CHECKS:
+        if elapsed < req_secs or state['checks'] < req_checks:
             return None
 
         # Survived — exit
@@ -443,14 +453,17 @@ class ExitManager:
         out = []
         for tid, s in self._pressure_watches.items():
             elapsed = (now - s['start']).total_seconds()
+            is_pri = s.get('underlying') in PRIORITY_UNDERLYINGS
+            req_secs = PRESSURE_LOST_SUSTAINED_SECONDS_PRIORITY if is_pri else PRESSURE_LOST_SUSTAINED_SECONDS
+            req_chk = PRESSURE_LOST_MIN_CHECKS_PRIORITY if is_pri else PRESSURE_LOST_MIN_CHECKS
             out.append({
                 'trade_id':   tid,
                 'symbol':     s.get('symbol'),
                 'underlying': s.get('underlying'),
                 'elapsed_s':  round(elapsed, 1),
-                'required_s': PRESSURE_LOST_SUSTAINED_SECONDS,
+                'required_s': req_secs,
                 'checks':     s['checks'],
-                'required_checks': PRESSURE_LOST_MIN_CHECKS,
+                'required_checks': req_chk,
                 'last_vol':   None,
                 'last_conf':  s.get('last_conf'),
                 'last_pnl':   s.get('last_pnl'),

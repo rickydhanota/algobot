@@ -1268,17 +1268,34 @@
       const symLabel = displayTicker({ symbol: w.symbol, asset_type: 'option' });
       const danger = (w.checks >= w.required_checks && w.elapsed_s >= w.required_s * 0.7);
       const statusCls = danger ? 'thesis-status danger' : 'thesis-status';
-      const statusTxt = danger ? '⚠ EXIT IMMINENT' : 'thesis breaking down';
+
+      // Different labels for the two watch types
+      let watchLabel;
+      if (w.type === 'profit_protect') {
+        watchLabel = danger ? '⚠ PROFIT EXIT IMMINENT' : '💰 protecting profits';
+      } else {
+        watchLabel = danger ? '⚠ EXIT IMMINENT' : 'thesis breaking down';
+      }
 
       const vol = (w.last_vol != null) ? w.last_vol.toFixed(2) + '×' : '?';
       const conf = (w.last_conf != null) ? w.last_conf : '?';
-      const pnlPct = ((w.last_pnl || 0) * 100).toFixed(1);
-      const pnlCls = pnlPct >= 0 ? 'green' : 'red';
+      const pnlVal = ((w.last_pnl || 0) * 100);
+      const pnlPct = pnlVal.toFixed(1);
+      const pnlCls = pnlVal >= 0 ? 'green' : 'red';
+
+      // Show which signal(s) are bad for profit-protect
+      let signalHint = '';
+      if (w.type === 'profit_protect') {
+        const bits = [];
+        if (w.vol_weak) bits.push('vol weak');
+        if (w.tape_weak) bits.push('tape against');
+        if (bits.length) signalHint = '<span style="color:#e3b341;">' + bits.join(' + ') + '</span>';
+      }
 
       return `<div class="thesis-row">
         <div class="thesis-head">
           <span class="thesis-sym">${symLabel}</span>
-          <span class="${statusCls}">${statusTxt}</span>
+          <span class="${statusCls}">${watchLabel}</span>
         </div>
         <div class="thesis-bar-wrap">
           <div class="thesis-bar" style="width:${pct}%"></div>
@@ -1288,7 +1305,8 @@
           <span><strong>${w.checks}</strong> / ${w.required_checks} bad checks</span>
           <span>vol <strong>${vol}</strong></span>
           <span>tape conf <strong>${conf}</strong></span>
-          <span>pnl <strong class="${pnlCls}">${pnlPct >= 0 ? '+' : ''}${pnlPct}%</strong></span>
+          <span>pnl <strong class="${pnlCls}">${pnlVal >= 0 ? '+' : ''}${pnlPct}%</strong></span>
+          ${signalHint ? `<span>${signalHint}</span>` : ''}
         </div>
       </div>`;
     }).join('');

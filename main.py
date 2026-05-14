@@ -1006,7 +1006,7 @@ class TradingBot:
             'session':         session_mod.to_dict(et_now()),
             'session_stats':   self.adaptive.session_stats(),
             'recent_rejections': list(self._rejections)[-40:][::-1],   # newest first
-            'thesis_watches':  self.exit_manager.active_thesis_watches(),
+            'thesis_watches':  self.exit_manager.all_active_watches(),
             'shadow':          self.shadow.stats_overall(),
             'shadow_buckets':  self.shadow.stats_by_bucket()[:10],
             'intel':           self.intel.dashboard_data(),

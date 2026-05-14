@@ -57,6 +57,16 @@ THESIS_SUSTAINED_SECONDS = 60       # ...continuously for 60s before exit fires
 THESIS_MIN_CHECKS = 6               # AND at least 6 consecutive bad samples (~30s @ 5s loop)
 THESIS_PROGRESS_LOG_EVERY = 3       # log progression every N checks
 
+# "Profit protect" — data-driven full-exit when the trade is in profit but
+# tape/volume support is fading. Specifically handles two cases the trim
+# ladder can't cover:
+#   1. Single-contract positions (trims round to 0 contracts)
+#   2. Multi-contract positions that have exhausted all trim tiers
+PROFIT_PROTECT_MIN_PCT = 0.05         # only engage when at least +5%
+PROFIT_PROTECT_VOL_THRESHOLD = 0.70   # volume below 70% normal = warning
+PROFIT_PROTECT_SUSTAINED_SECONDS = 30 # 30s sustained (faster than 60s thesis)
+PROFIT_PROTECT_MIN_CHECKS = 3         # 3+ consecutive bad samples (≈15s @ 5s loop)
+
 # Volume-aware trim acceleration (protects runners when momentum fades)
 VOLUME_TRIM_RATE_THRESHOLD = 0.70   # rate_ratio below this = "weakening"
 VOLUME_TRIM_TAPE_CONF_THRESHOLD = 30 # confluence below this + neutral dir = "tape fading"
@@ -83,6 +93,8 @@ class ExitManager:
         # Reset to empty whenever conditions recover — exit only fires when
         # the watch survives every check between start and 60s elapsed.
         self._thesis_watches: Dict[str, dict] = {}
+        # Active profit-protect watches (positions in profit but conditions fading)
+        self._profit_watches: Dict[str, dict] = {}
 
     def register_underlying(self, trade_id: str, underlying: str):
         self._underlying[trade_id] = underlying
@@ -127,6 +139,15 @@ class ExitManager:
             # 1b. Volume-aware acceleration (runner protection)
             decision = self._maybe_volume_trim(
                 trade, current, pnl_pct, priority_tape, volume_monitor,
+            )
+            if decision:
+                decisions.append(decision)
+                continue
+
+            # 1c. Profit-protect full exit — for positions in profit where the
+            # trim ladder cannot help (single contract or tiers exhausted)
+            decision = self._maybe_profit_protect(
+                trade, current, pnl_pct, priority_tape, volume_monitor, fallback_tape,
             )
             if decision:
                 decisions.append(decision)
@@ -288,6 +309,182 @@ class ExitManager:
             log.error(f'[{trade.symbol}] Thesis-broken close failed: {e}')
             return None
 
+    # ── Profit-protect check ─────────────────────────────────────────────────
+
+    def _maybe_profit_protect(
+        self,
+        trade,
+        current: float,
+        pnl_pct: float,
+        priority_tape,
+        volume_monitor,
+        fallback_tape=None,
+    ) -> Optional[ExitDecision]:
+        """
+        Data-driven full-exit for positions in profit where the trim ladder
+        can't help (1 contract, or all tiers already hit).
+
+        Fires when in profit ≥ +5% AND for 30+ seconds sustained:
+          • Volume rate < 0.7× normal, OR
+          • Tape direction has flipped away from our position
+        (Either condition alone — vs thesis-broken's AND — because we're
+        protecting realized gains and faster action is justified.)
+
+        Closes the FULL remaining position.
+        """
+        from datetime import datetime, timezone
+
+        tid = trade.trade_id
+
+        # Only protect meaningful profits
+        if pnl_pct < PROFIT_PROTECT_MIN_PCT:
+            self._profit_watches.pop(tid, None)
+            return None
+
+        # If the trim ladder could fire naturally, let it. We only act
+        # when (a) single contract or (b) every tier already hit.
+        if trade.contracts and trade.contracts > 1:
+            next_unhit_threshold = None
+            for idx, (threshold, _) in enumerate(TRIM_TIERS):
+                if idx not in trade.tier_hits and pnl_pct >= threshold:
+                    next_unhit_threshold = threshold
+                    break
+            if next_unhit_threshold is not None:
+                self._profit_watches.pop(tid, None)
+                return None
+
+        underlying = self._underlying.get(tid) or self._derive_underlying(trade.symbol)
+        our_dir = 'buy' if trade.option_type == 'call' else 'sell'
+        now = datetime.now(timezone.utc)
+
+        # Read volume + tape
+        vol_rate = None
+        vol_weak = False
+        if volume_monitor and underlying:
+            try:
+                v = volume_monitor.analyze(underlying)
+                if v:
+                    vol_rate = v.rate_ratio
+                    if v.rate_ratio < PROFIT_PROTECT_VOL_THRESHOLD:
+                        vol_weak = True
+            except Exception:
+                pass
+
+        tape_dir = None
+        tape_conf = None
+        tape_weak = False
+        if priority_tape and underlying:
+            try:
+                t = priority_tape.analyze(underlying)
+                if t:
+                    tape_dir = t.direction
+                    tape_conf = t.confluence_score
+                    if t.direction != our_dir:
+                        tape_weak = True
+            except Exception:
+                pass
+        if tape_dir is None and fallback_tape and underlying:
+            try:
+                t = fallback_tape.analyze(underlying)
+                if t:
+                    tape_dir = t.direction
+                    tape_conf = int((t.strength or 0) * 100)
+                    if t.direction != our_dir:
+                        tape_weak = True
+            except Exception:
+                pass
+
+        # EITHER signal weak triggers — vs thesis-broken's AND
+        if not (vol_weak or tape_weak):
+            if tid in self._profit_watches:
+                state = self._profit_watches[tid]
+                log.info(
+                    f'[{trade.symbol}] profit-protect RESET after '
+                    f'{state["checks"]} bad checks ({(now - state["start"]).total_seconds():.0f}s) — '
+                    f'support recovered (vol {vol_rate}, tape {tape_dir} conf {tape_conf})'
+                )
+            self._profit_watches.pop(tid, None)
+            return None
+
+        # Start or extend the watch
+        state = self._profit_watches.get(tid)
+        if state is None:
+            self._profit_watches[tid] = {
+                'start':      now,
+                'checks':     1,
+                'last_vol':   vol_rate,
+                'last_conf':  tape_conf,
+                'last_pnl':   pnl_pct,
+                'symbol':     trade.symbol,
+                'underlying': underlying,
+                'vol_weak':   vol_weak,
+                'tape_weak':  tape_weak,
+            }
+            reasons = []
+            if vol_weak:  reasons.append(f'vol {vol_rate:.2f}× < {PROFIT_PROTECT_VOL_THRESHOLD}')
+            if tape_weak: reasons.append(f'tape {tape_dir} (not our {our_dir})')
+            log.info(
+                f'[{trade.symbol}] 💰 profit-protect watch START @ {pnl_pct*100:+.1f}% — '
+                f'{", ".join(reasons)} — exit after {PROFIT_PROTECT_SUSTAINED_SECONDS}s + '
+                f'{PROFIT_PROTECT_MIN_CHECKS} checks sustained'
+            )
+            return None
+
+        state['checks']   += 1
+        state['last_vol']  = vol_rate
+        state['last_conf'] = tape_conf
+        state['last_pnl']  = pnl_pct
+        state['vol_weak']  = vol_weak
+        state['tape_weak'] = tape_weak
+        elapsed = (now - state['start']).total_seconds()
+
+        if elapsed < PROFIT_PROTECT_SUSTAINED_SECONDS or state['checks'] < PROFIT_PROTECT_MIN_CHECKS:
+            return None
+
+        # Survived — fire full exit
+        reasons = []
+        if vol_weak:  reasons.append(f'vol {vol_rate:.2f}×')
+        if tape_weak: reasons.append(f'tape {tape_dir}')
+        try:
+            self.orders._close_trade(trade, current, 'profit_protect')
+            self._profit_watches.pop(tid, None)
+            return ExitDecision(
+                trade_id=tid,
+                action='stop',
+                quantity=trade.contracts or 0,
+                reason=(f'profit-protect @ {pnl_pct*100:+.1f}%: {", ".join(reasons)} '
+                        f'sustained {elapsed:.0f}s / {state["checks"]} checks'),
+                pnl_pct=pnl_pct,
+            )
+        except Exception as e:
+            log.error(f'[{trade.symbol}] profit-protect close failed: {e}')
+            return None
+
+    def active_profit_watches(self) -> List[dict]:
+        """Snapshot of in-progress profit-protect watches for dashboard."""
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        out = []
+        for tid, s in self._profit_watches.items():
+            elapsed = (now - s['start']).total_seconds()
+            out.append({
+                'trade_id':   tid,
+                'symbol':     s.get('symbol'),
+                'underlying': s.get('underlying'),
+                'elapsed_s':  round(elapsed, 1),
+                'required_s': PROFIT_PROTECT_SUSTAINED_SECONDS,
+                'checks':     s['checks'],
+                'required_checks': PROFIT_PROTECT_MIN_CHECKS,
+                'last_vol':   s.get('last_vol'),
+                'last_conf':  s.get('last_conf'),
+                'last_pnl':   s.get('last_pnl'),
+                'vol_weak':   s.get('vol_weak'),
+                'tape_weak':  s.get('tape_weak'),
+                'progress':   min(1.0, elapsed / PROFIT_PROTECT_SUSTAINED_SECONDS),
+                'type':       'profit_protect',
+            })
+        return out
+
     def active_thesis_watches(self) -> List[dict]:
         """Snapshot of in-progress thesis watches for dashboard display."""
         from datetime import datetime, timezone
@@ -307,8 +504,13 @@ class ExitManager:
                 'last_conf':  s.get('last_conf'),
                 'last_pnl':   s.get('last_pnl'),
                 'progress':   min(1.0, elapsed / THESIS_SUSTAINED_SECONDS),
+                'type':       'thesis_broken',
             })
         return out
+
+    def all_active_watches(self) -> List[dict]:
+        """Combined list of all in-progress defensive exit watches."""
+        return self.active_thesis_watches() + self.active_profit_watches()
 
     def _maybe_trim(self, trade, current: float, pnl_pct: float) -> Optional[ExitDecision]:
         # Init metadata if missing (older trades from previous versions)

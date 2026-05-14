@@ -166,6 +166,99 @@ class TradingBot:
             except Exception as e:
                 log.warning(f'[{sym}] Could not load bars: {e}')
 
+    def _reconcile_positions(self):
+        """
+        Read open positions from Alpaca and rebuild self.orders.active so
+        the bot can manage them after a restart.
+
+        Without this, restarts cause "orphan positions" — Alpaca still
+        holds them but our trim ladder, dynamic stop, and thesis-broken
+        watch don't know they exist.
+        """
+        try:
+            positions = AlpacaClients.trading().get_all_positions()
+        except Exception as e:
+            log.warning(f'Position reconcile failed to fetch: {e}')
+            return
+
+        if not positions:
+            log.info('Position reconcile: no open positions at Alpaca — clean start')
+            return
+
+        from execution.order_manager import ActiveTrade
+        from strategy.options_strategy import parse_occ_symbol
+
+        rebuilt = 0
+        for p in positions:
+            sym = p.symbol
+            try:
+                qty = abs(int(float(p.qty)))
+                entry = float(p.avg_entry_price)
+                side = p.side.value if hasattr(p.side, 'value') else str(p.side)
+                direction = 'long' if side.lower() == 'long' else 'short'
+
+                # Detect option vs stock by OCC pattern
+                parsed = parse_occ_symbol(sym)
+                if parsed is not None:
+                    _under, expiry, opt_letter, strike = parsed
+                    asset_type = 'option'
+                    option_type = 'call' if opt_letter == 'C' else 'put'
+                    contracts = qty
+                    shares = qty * 100
+                    strategy = f'reconciled_{option_type}'
+                    underlying = parsed[0]
+                else:
+                    asset_type = 'stock'
+                    option_type = None
+                    contracts = None
+                    shares = qty
+                    strategy = 'reconciled_stock'
+                    underlying = sym
+                    strike = None
+
+                # Reasonable defaults for stop/target — match our standard rules
+                if asset_type == 'option':
+                    stop_price = round(entry * 0.50, 2)    # -50% premium soft stop
+                    target_price = round(entry * 2.00, 2)  # +100% target
+                else:
+                    stop_price = round(entry * 0.985, 2)   # -1.5% for stocks
+                    target_price = round(entry * 1.025, 2) # +2.5%
+
+                self.orders._trade_counter += 1
+                trade_id = f'R{self.orders._trade_counter:04d}'
+
+                trade = ActiveTrade(
+                    trade_id=trade_id,
+                    symbol=sym,
+                    asset_type=asset_type,
+                    direction=direction,
+                    strategy=strategy,
+                    entry_price=entry,
+                    stop_price=stop_price,
+                    target_price=target_price,
+                    shares=shares,
+                    order_id=None,
+                    option_type=option_type,
+                    strike=strike,
+                    contracts=contracts,
+                    original_contracts=contracts,
+                )
+                self.orders.active[trade_id] = trade
+                self.orders.risk.open_positions += 1
+
+                if asset_type == 'option':
+                    self.exit_manager.register_underlying(trade_id, underlying)
+
+                log.info(
+                    f'  reconciled {sym}: {asset_type} qty={qty} entry=${entry:.2f} '
+                    f'as trade_id {trade_id}'
+                )
+                rebuilt += 1
+            except Exception as e:
+                log.warning(f'  failed to reconcile {sym}: {e}')
+
+        log.info(f'Position reconcile: rebuilt {rebuilt}/{len(positions)} positions')
+
     def _capture_orb(self):
         log.info('Capturing opening range...')
         for sym in self.watchlist:
@@ -912,6 +1005,10 @@ class TradingBot:
             await self.dashboard_server.start()
         except Exception as e:
             log.warning(f'Dashboard server failed to start: {e}')
+
+        # Rebuild self.orders.active from any positions still open at Alpaca
+        # (handles restarts cleanly — otherwise positions become "orphans")
+        self._reconcile_positions()
 
         self._load_bars()
 

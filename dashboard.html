@@ -1269,10 +1269,12 @@
       const danger = (w.checks >= w.required_checks && w.elapsed_s >= w.required_s * 0.7);
       const statusCls = danger ? 'thesis-status danger' : 'thesis-status';
 
-      // Different labels for the two watch types
+      // Labels per watch type
       let watchLabel;
       if (w.type === 'profit_protect') {
         watchLabel = danger ? '⚠ PROFIT EXIT IMMINENT' : '💰 protecting profits';
+      } else if (w.type === 'pressure_lost') {
+        watchLabel = danger ? '⚠ PRESSURE EXIT IMMINENT' : '🔻 tape pressure fading';
       } else {
         watchLabel = danger ? '⚠ EXIT IMMINENT' : 'thesis breaking down';
       }

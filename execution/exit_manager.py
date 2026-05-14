@@ -57,6 +57,14 @@ THESIS_SUSTAINED_SECONDS = 60       # ...continuously for 60s before exit fires
 THESIS_MIN_CHECKS = 6               # AND at least 6 consecutive bad samples (~30s @ 5s loop)
 THESIS_PROGRESS_LOG_EVERY = 3       # log progression every N checks
 
+# "Pressure lost" — exit when directional conviction in the tape dissolves.
+# Fires at ANY P&L when tape goes neutral or imbalance falls below floor for
+# sustained 45s + 5 checks. The trade thesis depends on directional pressure;
+# if pressure disappears, exit before the position drifts.
+PRESSURE_LOST_IMBALANCE_FLOOR = 0.15
+PRESSURE_LOST_SUSTAINED_SECONDS = 45
+PRESSURE_LOST_MIN_CHECKS = 5
+
 # "Profit protect" — data-driven full-exit for the +5%..+20% gap zone
 # before the first natural trim tier. Above +20% the data-driven tier trim
 # takes over. Below +5% we treat noise as noise.
@@ -94,6 +102,8 @@ class ExitManager:
         self._thesis_watches: Dict[str, dict] = {}
         # Active profit-protect watches (positions in profit but conditions fading)
         self._profit_watches: Dict[str, dict] = {}
+        # Active pressure-lost watches (tape conviction has dissolved)
+        self._pressure_watches: Dict[str, dict] = {}
 
     def register_underlying(self, trade_id: str, underlying: str):
         self._underlying[trade_id] = underlying
@@ -120,7 +130,15 @@ class ExitManager:
 
             pnl_pct = (current - trade.entry_price) / trade.entry_price
 
-            # 0. Thesis-broken check — covers the −15% to +20% no-man's-land
+            # 0a. Pressure-lost — exit at ANY P&L if tape conviction dissolves
+            decision = self._maybe_pressure_lost(
+                trade, current, pnl_pct, priority_tape, fallback_tape,
+            )
+            if decision:
+                decisions.append(decision)
+                continue
+
+            # 0b. Thesis-broken — covers the −15% to +20% no-man's-land
             decision = self._maybe_thesis_broken(
                 trade, current, pnl_pct, priority_tape, volume_monitor,
                 fallback_tape=fallback_tape,
@@ -304,6 +322,144 @@ class ExitManager:
         except Exception as e:
             log.error(f'[{trade.symbol}] Thesis-broken close failed: {e}')
             return None
+
+    # ── Pressure-lost check ──────────────────────────────────────────────────
+
+    def _maybe_pressure_lost(
+        self,
+        trade,
+        current: float,
+        pnl_pct: float,
+        priority_tape,
+        fallback_tape=None,
+    ) -> Optional[ExitDecision]:
+        """
+        Exit if directional pressure dissolves. Fires when tape direction
+        goes neutral OR absolute imbalance falls below the floor (0.15),
+        sustained for 45 seconds AND 5 consecutive bad samples.
+
+        Runs at ANY P&L — applies the principle 'trade WITH the tape' to
+        positions that are already open. If the tape stops showing the
+        conviction that justified entry, get out.
+        """
+        from datetime import datetime, timezone
+
+        tid = trade.trade_id
+        underlying = self._underlying.get(tid) or self._derive_underlying(trade.symbol)
+
+        tape_dir = None
+        tape_imb = None
+        tape_conf = None
+
+        if priority_tape and underlying:
+            try:
+                t = priority_tape.analyze(underlying)
+                if t:
+                    tape_dir = t.direction
+                    tape_imb = t.imbalance_100
+                    tape_conf = t.confluence_score
+            except Exception:
+                pass
+        if tape_dir is None and fallback_tape and underlying:
+            try:
+                t = fallback_tape.analyze(underlying)
+                if t:
+                    tape_dir = t.direction
+                    tape_imb = t.imbalance
+                    tape_conf = int((t.strength or 0) * 100)
+            except Exception:
+                pass
+
+        if tape_dir is None or tape_imb is None:
+            self._pressure_watches.pop(tid, None)
+            return None
+
+        pressure_lost = (
+            tape_dir == 'neutral'
+            or abs(tape_imb) < PRESSURE_LOST_IMBALANCE_FLOOR
+        )
+
+        if not pressure_lost:
+            if tid in self._pressure_watches:
+                state = self._pressure_watches[tid]
+                now = datetime.now(timezone.utc)
+                log.info(
+                    f'[{trade.symbol}] pressure-lost RESET after {state["checks"]} bad checks — '
+                    f'tape regained conviction (dir={tape_dir}, imb={tape_imb:+.2f})'
+                )
+            self._pressure_watches.pop(tid, None)
+            return None
+
+        now = datetime.now(timezone.utc)
+        state = self._pressure_watches.get(tid)
+        if state is None:
+            self._pressure_watches[tid] = {
+                'start':      now,
+                'checks':     1,
+                'last_dir':   tape_dir,
+                'last_imb':   tape_imb,
+                'last_conf':  tape_conf,
+                'last_pnl':   pnl_pct,
+                'symbol':     trade.symbol,
+                'underlying': underlying,
+            }
+            log.info(
+                f'[{trade.symbol}] 🔻 pressure-lost watch START @ {pnl_pct*100:+.1f}% '
+                f'— tape {tape_dir} imb {tape_imb:+.2f} '
+                f'(need {PRESSURE_LOST_SUSTAINED_SECONDS}s + {PRESSURE_LOST_MIN_CHECKS} checks)'
+            )
+            return None
+
+        state['checks']   += 1
+        state['last_dir']  = tape_dir
+        state['last_imb']  = tape_imb
+        state['last_conf'] = tape_conf
+        state['last_pnl']  = pnl_pct
+        elapsed = (now - state['start']).total_seconds()
+
+        if elapsed < PRESSURE_LOST_SUSTAINED_SECONDS or state['checks'] < PRESSURE_LOST_MIN_CHECKS:
+            return None
+
+        # Survived — exit
+        try:
+            self.orders._close_trade(trade, current, 'pressure_lost')
+            self._pressure_watches.pop(tid, None)
+            return ExitDecision(
+                trade_id=tid,
+                action='stop',
+                quantity=trade.contracts or 0,
+                reason=(f'pressure lost @ {pnl_pct*100:+.1f}% — tape {tape_dir} '
+                        f'imb {tape_imb:+.2f} sustained {elapsed:.0f}s / {state["checks"]} checks'),
+                pnl_pct=pnl_pct,
+            )
+        except Exception as e:
+            log.error(f'[{trade.symbol}] pressure-lost close failed: {e}')
+            return None
+
+    def active_pressure_watches(self) -> List[dict]:
+        """Snapshot of in-progress pressure-lost watches for dashboard."""
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        out = []
+        for tid, s in self._pressure_watches.items():
+            elapsed = (now - s['start']).total_seconds()
+            out.append({
+                'trade_id':   tid,
+                'symbol':     s.get('symbol'),
+                'underlying': s.get('underlying'),
+                'elapsed_s':  round(elapsed, 1),
+                'required_s': PRESSURE_LOST_SUSTAINED_SECONDS,
+                'checks':     s['checks'],
+                'required_checks': PRESSURE_LOST_MIN_CHECKS,
+                'last_vol':   None,
+                'last_conf':  s.get('last_conf'),
+                'last_pnl':   s.get('last_pnl'),
+                'tape_dir':   s.get('last_dir'),
+                'tape_imb':   s.get('last_imb'),
+                'progress':   min(1.0, elapsed / PRESSURE_LOST_SUSTAINED_SECONDS),
+                'type':       'pressure_lost',
+            })
+        return out
 
     # ── Profit-protect check ─────────────────────────────────────────────────
 
@@ -495,7 +651,11 @@ class ExitManager:
 
     def all_active_watches(self) -> List[dict]:
         """Combined list of all in-progress defensive exit watches."""
-        return self.active_thesis_watches() + self.active_profit_watches()
+        return (
+            self.active_thesis_watches()
+            + self.active_profit_watches()
+            + self.active_pressure_watches()
+        )
 
     def _maybe_trim(
         self,

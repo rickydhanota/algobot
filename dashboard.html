@@ -192,6 +192,46 @@
       margin-left: 4px;
     }
 
+    /* Thesis-watch cards */
+    .thesis-row {
+      padding: 14px 18px;
+      border-bottom: 1px solid #21262d;
+    }
+    .thesis-row:last-child { border-bottom: none; }
+    .thesis-row:hover { background: #1c2128; }
+
+    .thesis-head {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 9px;
+    }
+    .thesis-sym { font-weight: 700; color: #e6edf3; font-size: 14px; }
+    .thesis-status {
+      font-size: 10px; font-weight: 700; letter-spacing: 0.5px;
+      color: #e3b341;
+      background: #3a3122; border: 1px solid #e3b34155;
+      padding: 2px 9px; border-radius: 10px; text-transform: uppercase;
+    }
+    .thesis-status.danger {
+      color: #f85149; background: #3a1a1a; border-color: #f85149;
+      animation: pulse 1.8s infinite;
+    }
+
+    .thesis-bar-wrap {
+      height: 6px; background: #21262d; border-radius: 3px;
+      overflow: hidden; margin-bottom: 9px;
+    }
+    .thesis-bar {
+      height: 100%; border-radius: 3px;
+      background: linear-gradient(90deg, #e3b341 0%, #f85149 100%);
+      transition: width 0.6s ease-out;
+    }
+
+    .thesis-meta {
+      display: flex; flex-wrap: wrap; gap: 18px;
+      font-size: 11px; color: #8b949e;
+    }
+    .thesis-meta strong { color: #e6edf3; font-weight: 600; }
+
     /* Rejection category badges */
     .rej-cat {
       display:inline-block; padding:1px 7px; border-radius:3px;
@@ -652,6 +692,17 @@
     </div>
   </div>
 
+  <!-- Thesis Watches -->
+  <div>
+    <div class="section-header">
+      <span class="section-title">Thesis Watches — Defensive Exit Monitoring</span>
+      <span class="badge" id="thesis-count">0</span>
+    </div>
+    <div id="thesis-panel" class="table-wrap" style="padding:0;">
+      <div class="empty-mini">No active thesis watches</div>
+    </div>
+  </div>
+
   <!-- Closed Trades -->
   <div>
     <div class="section-header">
@@ -1080,6 +1131,9 @@
     // Earnings
     renderEarnings(data.earnings || []);
 
+    // Thesis-broken watches in progress
+    renderThesisWatches(data.thesis_watches || []);
+
     // Recent rejections — near-misses for learning
     renderRejections(data.recent_rejections || []);
 
@@ -1179,6 +1233,44 @@
     if (n >= 1e6)  return '$' + (n / 1e6).toFixed(1) + 'M';
     if (n >= 1e3)  return '$' + (n / 1e3).toFixed(0) + 'K';
     return '$' + n.toFixed(0);
+  }
+
+  function renderThesisWatches(watches) {
+    document.getElementById('thesis-count').textContent = watches.length;
+    const panel = document.getElementById('thesis-panel');
+    if (!watches.length) {
+      panel.innerHTML = '<div class="empty-mini">No active thesis watches</div>';
+      return;
+    }
+    panel.innerHTML = watches.map(w => {
+      const pct = Math.min(100, (w.progress || 0) * 100);
+      const symLabel = displayTicker({ symbol: w.symbol, asset_type: 'option' });
+      const danger = (w.checks >= w.required_checks && w.elapsed_s >= w.required_s * 0.7);
+      const statusCls = danger ? 'thesis-status danger' : 'thesis-status';
+      const statusTxt = danger ? '⚠ EXIT IMMINENT' : 'thesis breaking down';
+
+      const vol = (w.last_vol != null) ? w.last_vol.toFixed(2) + '×' : '?';
+      const conf = (w.last_conf != null) ? w.last_conf : '?';
+      const pnlPct = ((w.last_pnl || 0) * 100).toFixed(1);
+      const pnlCls = pnlPct >= 0 ? 'green' : 'red';
+
+      return `<div class="thesis-row">
+        <div class="thesis-head">
+          <span class="thesis-sym">${symLabel}</span>
+          <span class="${statusCls}">${statusTxt}</span>
+        </div>
+        <div class="thesis-bar-wrap">
+          <div class="thesis-bar" style="width:${pct}%"></div>
+        </div>
+        <div class="thesis-meta">
+          <span><strong>${w.elapsed_s.toFixed(0)}s</strong> / ${w.required_s}s elapsed</span>
+          <span><strong>${w.checks}</strong> / ${w.required_checks} bad checks</span>
+          <span>vol <strong>${vol}</strong></span>
+          <span>tape conf <strong>${conf}</strong></span>
+          <span>pnl <strong class="${pnlCls}">${pnlPct >= 0 ? '+' : ''}${pnlPct}%</strong></span>
+        </div>
+      </div>`;
+    }).join('');
   }
 
   function renderRejections(items) {

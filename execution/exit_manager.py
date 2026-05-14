@@ -94,6 +94,7 @@ class ExitManager:
         live_prices: Dict[str, float],
         priority_tape: Optional['PriorityTapeReader'] = None,
         volume_monitor=None,
+        fallback_tape=None,
     ) -> List[ExitDecision]:
         decisions: List[ExitDecision] = []
         for trade_id, trade in list(self.orders.active.items()):
@@ -111,6 +112,7 @@ class ExitManager:
             # 0. Thesis-broken check — covers the −15% to +20% no-man's-land
             decision = self._maybe_thesis_broken(
                 trade, current, pnl_pct, priority_tape, volume_monitor,
+                fallback_tape=fallback_tape,
             )
             if decision:
                 decisions.append(decision)
@@ -149,6 +151,7 @@ class ExitManager:
         pnl_pct: float,
         priority_tape,
         volume_monitor,
+        fallback_tape=None,
     ) -> Optional[ExitDecision]:
         """
         Covers the gap between -15% (soft stop) and +20% (tier 1 trim) where
@@ -189,13 +192,30 @@ class ExitManager:
         tape_conf = None
         tape_dir = None
         tape_not_supporting = False
+        our_dir = 'buy' if trade.option_type == 'call' else 'sell'
+
+        # Try priority tape first (richer signal for SPY/SPX/TSLA)
         if priority_tape and underlying:
             try:
                 t = priority_tape.analyze(underlying)
                 if t:
                     tape_dir = t.direction
                     tape_conf = t.confluence_score
-                    our_dir = 'buy' if trade.option_type == 'call' else 'sell'
+                    if t.direction != our_dir:
+                        tape_not_supporting = True
+            except Exception:
+                pass
+
+        # Fallback to regular tape reader for non-priority symbols (AAPL,
+        # PLTR, IWM, etc.) — direction is enough for the thesis check
+        if tape_dir is None and fallback_tape and underlying:
+            try:
+                t = fallback_tape.analyze(underlying)
+                if t:
+                    tape_dir = t.direction
+                    # Regular TapeSignal doesn't have confluence_score —
+                    # use strength × 100 as a proxy for display
+                    tape_conf = int((t.strength or 0) * 100)
                     if t.direction != our_dir:
                         tape_not_supporting = True
             except Exception:

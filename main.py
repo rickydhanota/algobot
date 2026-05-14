@@ -141,11 +141,13 @@ class TradingBot:
             vwap = self.market_data.update_vwap(sym, price, size)
             self._live_vwap[sym] = vwap
             self.tape.record_trade(sym, price, size)
-            # Priority symbols get richer tracking
+            # Volume monitor + entry quality now track ALL watchlist symbols
+            # so the thesis-broken watch works for any open position
+            self.volume.record_trade(sym, size)
+            self.entry_quality.record_price(sym, price)
+            # Priority symbols also get the enhanced multi-window tape reader
             if sym in PRIORITY_SYMBOLS or sym == 'SPY':
                 self.priority_tape.record_trade(sym, price, size)
-                self.volume.record_trade(sym, size)
-                self.entry_quality.record_price(sym, price)
                 if sym == 'SPY':
                     # also feed SPX proxy
                     self.entry_quality.record_price('SPX', price)
@@ -715,9 +717,12 @@ class TradingBot:
             self.orders.check_exits(self._live_prices)
             self._check_eod_close()    # honours day-trade-only policy
 
-            # Tiered trimming + tape-aware dynamic stops (options only)
+            # Tiered trimming + tape-aware dynamic stops (options only).
+            # Fallback tape covers non-priority symbols (AAPL, IWM, etc.)
+            # so the thesis-broken watch can fire for them too.
             decisions = self.exit_manager.process(
                 self._live_prices, self.priority_tape, self.volume,
+                fallback_tape=self.tape,
             )
             for d in decisions:
                 log.info(f'[exit] {d.action}={d.quantity} ({d.reason}) pnl={d.pnl_pct*100:+.1f}%')

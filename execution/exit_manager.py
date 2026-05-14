@@ -47,6 +47,14 @@ TAPE_FLIP_THRESHOLD = 0.40      # opposite-direction imbalance triggers exit
 TAPE_AGAINST_CONF_MIN = 40      # at soft stop, tape confluence ≥ this against us = exit
 TAPE_AGAINST_IMBALANCE_MIN = 0.30
 
+# "Thesis broken" check — covers the gap between -15% soft stop and +20% tier 1
+# where no other exit logic operates. Closes the trade when the conditions
+# that justified entry have evaporated.
+THESIS_PNL_LOW  = -0.15             # only fires inside this band...
+THESIS_PNL_HIGH = 0.20              # ...where no other exit logic operates
+THESIS_VOL_RATE_MAX = 0.50          # volume must be < 0.5× normal
+THESIS_SUSTAINED_SECONDS = 60       # ...continuously for 60s before exit fires
+
 # Volume-aware trim acceleration (protects runners when momentum fades)
 VOLUME_TRIM_RATE_THRESHOLD = 0.70   # rate_ratio below this = "weakening"
 VOLUME_TRIM_TAPE_CONF_THRESHOLD = 30 # confluence below this + neutral dir = "tape fading"
@@ -68,6 +76,9 @@ class ExitManager:
         # Underlying mapping for options (e.g., AAPL250117C00200000 → AAPL)
         # Populated when the option order is placed via `register_underlying`.
         self._underlying: Dict[str, str] = {}
+        # When did volume + tape first weaken for each trade?
+        # Used to require sustained weakness (not flicker) before thesis-broken exit
+        self._thesis_weak_since: Dict[str, 'datetime'] = {}
 
     def register_underlying(self, trade_id: str, underlying: str):
         self._underlying[trade_id] = underlying
@@ -93,6 +104,14 @@ class ExitManager:
 
             pnl_pct = (current - trade.entry_price) / trade.entry_price
 
+            # 0. Thesis-broken check — covers the −15% to +20% no-man's-land
+            decision = self._maybe_thesis_broken(
+                trade, current, pnl_pct, priority_tape, volume_monitor,
+            )
+            if decision:
+                decisions.append(decision)
+                continue
+
             # 1. Natural tiered trimming (profit thresholds)
             decision = self._maybe_trim(trade, current, pnl_pct)
             if decision:
@@ -116,6 +135,96 @@ class ExitManager:
         return decisions
 
     # ── Tiered trimming ──────────────────────────────────────────────────────
+
+    # ── Thesis-broken check ──────────────────────────────────────────────────
+
+    def _maybe_thesis_broken(
+        self,
+        trade,
+        current: float,
+        pnl_pct: float,
+        priority_tape,
+        volume_monitor,
+    ) -> Optional[ExitDecision]:
+        """
+        Covers the gap between -15% (soft stop) and +20% (tier 1 trim) where
+        no other exit logic operates.
+
+        If for SUSTAINED 60+ seconds:
+          • Volume rate falls below 0.5× normal
+          • AND underlying tape direction is no longer ours
+        the original thesis is dead — exit before theta eats us.
+        """
+        from datetime import datetime, timezone
+
+        tid = trade.trade_id
+
+        # Only operates in the gap zone
+        if not (THESIS_PNL_LOW < pnl_pct < THESIS_PNL_HIGH):
+            self._thesis_weak_since.pop(tid, None)
+            return None
+
+        underlying = self._underlying.get(tid) or self._derive_underlying(trade.symbol)
+
+        # Read both indicators
+        vol_weak = False
+        vol_label = ''
+        if volume_monitor and underlying:
+            try:
+                v = volume_monitor.analyze(underlying)
+                if v and v.rate_ratio < THESIS_VOL_RATE_MAX:
+                    vol_weak = True
+                    vol_label = f'rate {v.rate_ratio:.2f}×'
+            except Exception:
+                pass
+
+        tape_not_supporting = False
+        tape_label = ''
+        if priority_tape and underlying:
+            try:
+                t = priority_tape.analyze(underlying)
+                if t:
+                    our_dir = 'buy' if trade.option_type == 'call' else 'sell'
+                    if t.direction != our_dir:
+                        tape_not_supporting = True
+                        tape_label = f'tape {t.direction} conf={t.confluence_score}'
+            except Exception:
+                pass
+
+        # Need BOTH conditions to start/sustain the timer
+        if not (vol_weak and tape_not_supporting):
+            self._thesis_weak_since.pop(tid, None)
+            return None
+
+        now = datetime.now(timezone.utc)
+        weak_since = self._thesis_weak_since.get(tid)
+        if weak_since is None:
+            self._thesis_weak_since[tid] = now
+            log.info(
+                f'[{trade.symbol}] thesis watch started at {pnl_pct*100:+.1f}% '
+                f'({vol_label}, {tape_label}) — exit fires after {THESIS_SUSTAINED_SECONDS}s sustained'
+            )
+            return None
+
+        elapsed = (now - weak_since).total_seconds()
+        if elapsed < THESIS_SUSTAINED_SECONDS:
+            return None
+
+        # Sustained — exit
+        try:
+            self.orders._close_trade(trade, current, 'thesis_broken')
+            self._thesis_weak_since.pop(tid, None)
+            return ExitDecision(
+                trade_id=tid,
+                action='stop',
+                quantity=trade.contracts or 0,
+                reason=(f'thesis broken at {pnl_pct*100:+.1f}%: {vol_label} + {tape_label} '
+                        f'sustained {elapsed:.0f}s'),
+                pnl_pct=pnl_pct,
+            )
+        except Exception as e:
+            log.error(f'[{trade.symbol}] Thesis-broken close failed: {e}')
+            return None
 
     def _maybe_trim(self, trade, current: float, pnl_pct: float) -> Optional[ExitDecision]:
         # Init metadata if missing (older trades from previous versions)

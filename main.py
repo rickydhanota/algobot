@@ -552,18 +552,25 @@ class TradingBot:
                         )
                         return None
 
-                    self.adaptive.record_signal(
-                        signal_id=f'{sym}-{strat_name}-{int(opt_setup.timestamp.timestamp())}',
-                        symbol=sym,
-                        strategy=strat_name,
-                        score=opt_setup.score,
-                        imbalance=tape_signal.imbalance if tape_signal else 0.0,
-                        rvol=tech.rvol if tech else 0.0,
-                        confluence_score=priority_sig.confluence_score if priority_sig else 0,
-                        direction='long' if opt_setup.option_type == 'call' else 'short',
-                        session_window=session_window,
-                    )
-                    return {'type': 'option', 'setup': opt_setup, 'tech': tech, 'tape': tape_signal}
+                    # Pass features through so the main loop can record the
+                    # signal using trade_id as the key (after place succeeds).
+                    # This guarantees signal_id == trade_id for clean outcome
+                    # matching when the trade later closes.
+                    return {
+                        'type': 'option',
+                        'setup': opt_setup,
+                        'tech': tech,
+                        'tape': tape_signal,
+                        'features': {
+                            'strategy':    strat_name,
+                            'score':       opt_setup.score,
+                            'imbalance':   tape_signal.imbalance if tape_signal else 0.0,
+                            'rvol':        tech.rvol if tech else 0.0,
+                            'confluence':  priority_sig.confluence_score if priority_sig else 0,
+                            'direction':   'long' if opt_setup.option_type == 'call' else 'short',
+                            'session':     session_window,
+                        },
+                    }
 
         # ── No viable options. In options-only mode, stop here. ──────────────
         if config.OPTIONS_ONLY_MODE:
@@ -598,18 +605,21 @@ class TradingBot:
             if stock_setup.score < config.MIN_SIGNAL_SCORE + adj:
                 return None
 
-            self.adaptive.record_signal(
-                signal_id=f'{sym}-{stock_setup.strategy}-{int(stock_setup.timestamp.timestamp())}',
-                symbol=sym,
-                strategy=stock_setup.strategy,
-                score=stock_setup.score,
-                imbalance=tape_signal.imbalance if tape_signal else 0.0,
-                rvol=stock_setup.rvol,
-                confluence_score=priority_sig.confluence_score if priority_sig else 0,
-                direction=stock_setup.direction,
-                session_window=session_window,
-            )
-            return {'type': 'stock', 'setup': stock_setup, 'tech': tech, 'tape': tape_signal}
+            return {
+                'type': 'stock',
+                'setup': stock_setup,
+                'tech': tech,
+                'tape': tape_signal,
+                'features': {
+                    'strategy':    stock_setup.strategy,
+                    'score':       stock_setup.score,
+                    'imbalance':   tape_signal.imbalance if tape_signal else 0.0,
+                    'rvol':        stock_setup.rvol,
+                    'confluence':  priority_sig.confluence_score if priority_sig else 0,
+                    'direction':   stock_setup.direction,
+                    'session':     session_window,
+                },
+            }
 
         return None
 
@@ -755,11 +765,25 @@ class TradingBot:
                 if not self._entry_quality_ok(sym, result):
                     continue
 
+                features = result.get('features', {})
+
                 if result['type'] == 'stock':
                     setup = result['setup']
                     trade = self.orders.place_stock_trade(setup)
                     if trade:
                         self._traded_today.add(sym)
+                        # Record signal using trade_id so outcome can match on close
+                        self.adaptive.record_signal(
+                            signal_id=trade.trade_id,
+                            symbol=sym,
+                            strategy=features.get('strategy', trade.strategy),
+                            score=features.get('score', setup.score),
+                            imbalance=features.get('imbalance', 0.0),
+                            rvol=features.get('rvol', 0.0),
+                            confluence_score=features.get('confluence', 0),
+                            direction=features.get('direction', trade.direction),
+                            session_window=features.get('session', ''),
+                        )
                         self._record_closed_on_exit(trade, setup.score, setup.rvol, setup.tape_imbalance)
 
                 elif result['type'] == 'option':
@@ -769,6 +793,18 @@ class TradingBot:
                         self._traded_today.add(sym)
                         # Register underlying so dynamic stop can read its tape
                         self.exit_manager.register_underlying(trade.trade_id, sym)
+                        # Record signal keyed by trade_id (matches outcome on close)
+                        self.adaptive.record_signal(
+                            signal_id=trade.trade_id,
+                            symbol=sym,
+                            strategy=features.get('strategy', trade.strategy),
+                            score=features.get('score', setup.score),
+                            imbalance=features.get('imbalance', 0.0),
+                            rvol=features.get('rvol', 0.0),
+                            confluence_score=features.get('confluence', 0),
+                            direction=features.get('direction', 'long' if setup.option_type == 'call' else 'short'),
+                            session_window=features.get('session', ''),
+                        )
                     else:
                         # Order failed (risk manager, sizing, or broker error)
                         self._track_rejection(
@@ -786,9 +822,8 @@ class TradingBot:
             if t.realized_pnl is None:
                 continue
             self.tracker.record(t, score=score, rvol=rvol, tape_imbalance=imb)
-            # Feed outcome to adaptive learner — uses our signal_id format
-            sig_id = f'{t.symbol}-{t.strategy}-{int(t.entry_time.timestamp())}'
-            self.adaptive.record_outcome(sig_id, t.realized_pnl)
+            # Match outcome to signal by trade_id (single source of truth)
+            self.adaptive.record_outcome(t.trade_id, t.realized_pnl)
 
     # ── Dashboard ─────────────────────────────────────────────────────────────
 

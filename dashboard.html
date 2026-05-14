@@ -471,6 +471,7 @@
 <div id="topbar">
   <h1>ALGOBOT</h1>
   <span id="phase-badge">—</span>
+  <span id="session-badge" class="pill" style="padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700;letter-spacing:1px;background:#21262d;color:#8b949e;border:1px solid #30363d;">SESSION —</span>
   <span id="mode-badge" class="pill" style="background:#3d1f6033;color:#bc8cff;border:1px solid #8b5cf6;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700;letter-spacing:1px;">⚡ OPTIONS FOCUS</span>
   <span id="last-updated">Waiting for bot data...</span>
 </div>
@@ -983,6 +984,25 @@
     const modeEl = document.getElementById('mode-badge');
     if (modeEl) {
       modeEl.textContent = data.options_only ? '⚡ OPTIONS-ONLY' : '⚡ OPTIONS-FIRST (stock fallback)';
+    }
+
+    // Session pill — color by priority
+    const sessEl = document.getElementById('session-badge');
+    if (sessEl && data.session) {
+      const s = data.session;
+      sessEl.textContent = (s.label || '—') +
+        (s.size_mult != null ? ` ${(s.size_mult * 100).toFixed(0)}%` : '');
+      let bg, fg, br;
+      if (s.window === 'power_open' || s.window === 'power_close') {
+        bg = '#1a3a2233'; fg = '#3fb950'; br = '#2ea043';
+      } else if (s.window === 'midday') {
+        bg = '#3a3122';  fg = '#e3b341'; br = '#e3b34155';
+      } else {
+        bg = '#21262d';  fg = '#8b949e'; br = '#30363d';
+      }
+      sessEl.style.background = bg;
+      sessEl.style.color = fg;
+      sessEl.style.border = `1px solid ${br}`;
     }
 
     const genAt = data.generated_at ? fmtTime(data.generated_at) + ' PT' : 'unknown';

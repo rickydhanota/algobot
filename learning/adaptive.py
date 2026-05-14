@@ -83,6 +83,11 @@ class AdaptiveLearner:
                 )
             ''')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_sym_strat ON signal_records(symbol, strategy)')
+            # Lightweight migration: add session_window column if missing
+            try:
+                conn.execute('ALTER TABLE signal_records ADD COLUMN session_window TEXT')
+            except sqlite3.OperationalError:
+                pass  # column already exists
             conn.commit()
 
     # ── Recording ────────────────────────────────────────────────────────────
@@ -97,16 +102,18 @@ class AdaptiveLearner:
         rvol: float = 0.0,
         confluence_score: int = 0,
         direction: str = '',
+        session_window: str = '',
     ):
         with self._conn() as conn:
             conn.execute('''
                 INSERT OR REPLACE INTO signal_records
                 (signal_id, symbol, strategy, score, imbalance, rvol,
-                 confluence_score, direction, timestamp, outcome, pnl)
-                VALUES (?,?,?,?,?,?,?,?,?,NULL,NULL)
+                 confluence_score, direction, timestamp, outcome, pnl, session_window)
+                VALUES (?,?,?,?,?,?,?,?,?,NULL,NULL,?)
             ''', (
                 signal_id, symbol, strategy, score, imbalance, rvol,
                 confluence_score, direction, datetime.now(timezone.utc).isoformat(),
+                session_window,
             ))
             conn.commit()
 
@@ -126,13 +133,26 @@ class AdaptiveLearner:
         symbol: str,
         strategy: str,
         last_n: int = 30,
+        session_window: Optional[str] = None,
     ) -> Optional[BucketStats]:
+        """
+        Rolling stats for a (symbol, strategy) pair.
+        If session_window is provided, filter to that window only.
+        """
         with self._conn() as conn:
-            rows = conn.execute('''
-                SELECT outcome, pnl FROM signal_records
-                WHERE symbol=? AND strategy=? AND outcome IS NOT NULL
-                ORDER BY timestamp DESC LIMIT ?
-            ''', (symbol, strategy, last_n)).fetchall()
+            if session_window:
+                rows = conn.execute('''
+                    SELECT outcome, pnl FROM signal_records
+                    WHERE symbol=? AND strategy=? AND session_window=?
+                          AND outcome IS NOT NULL
+                    ORDER BY timestamp DESC LIMIT ?
+                ''', (symbol, strategy, session_window, last_n)).fetchall()
+            else:
+                rows = conn.execute('''
+                    SELECT outcome, pnl FROM signal_records
+                    WHERE symbol=? AND strategy=? AND outcome IS NOT NULL
+                    ORDER BY timestamp DESC LIMIT ?
+                ''', (symbol, strategy, last_n)).fetchall()
 
         if not rows:
             return None
@@ -148,11 +168,10 @@ class AdaptiveLearner:
         win_rate = wins / total
         avg_pnl = sum(pnls) / len(pnls)
 
-        # Adjust threshold based on rolling performance
         if total < MIN_SAMPLE_SIZE:
             adj = 0
         else:
-            delta = BASELINE_WIN_RATE - win_rate    # positive when losing
+            delta = BASELINE_WIN_RATE - win_rate
             if delta > 0:
                 adj = int(min(MAX_TIGHTEN, delta * 100 * TIGHTEN_PER_LOSS / 10))
             else:
@@ -170,10 +189,52 @@ class AdaptiveLearner:
             threshold_adjustment=adj,
         )
 
-    def threshold_adjustment(self, symbol: str, strategy: str) -> int:
-        """Returns points to add to MIN_SIGNAL_SCORE for this (symbol, strategy)."""
+    def threshold_adjustment(
+        self,
+        symbol: str,
+        strategy: str,
+        session_window: Optional[str] = None,
+    ) -> int:
+        """
+        Returns points to add to MIN_SIGNAL_SCORE for this bucket.
+        If session_window is provided AND has ≥ MIN_SAMPLE_SIZE samples,
+        use the per-window adjustment. Otherwise fall back to overall.
+        """
+        if session_window:
+            window_stats = self.bucket_stats(symbol, strategy, session_window=session_window)
+            if window_stats and window_stats.sample_size >= MIN_SAMPLE_SIZE:
+                return window_stats.threshold_adjustment
         stats = self.bucket_stats(symbol, strategy)
         return stats.threshold_adjustment if stats else 0
+
+    def session_stats(self) -> List[dict]:
+        """Per-session-window stats across all (symbol, strategy) pairs."""
+        with self._conn() as conn:
+            rows = conn.execute('''
+                SELECT session_window,
+                       COUNT(*) AS total,
+                       SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) AS wins,
+                       SUM(CASE WHEN outcome='loss' THEN 1 ELSE 0 END) AS losses,
+                       SUM(COALESCE(pnl, 0)) AS total_pnl
+                FROM signal_records
+                WHERE outcome IS NOT NULL AND session_window IS NOT NULL
+                GROUP BY session_window
+            ''').fetchall()
+        out = []
+        for window, total, wins, losses, total_pnl in rows:
+            if not total:
+                continue
+            decided = (wins or 0) + (losses or 0)
+            out.append({
+                'session_window': window or 'unknown',
+                'sample_size':    total,
+                'wins':           wins or 0,
+                'losses':         losses or 0,
+                'win_rate':       round((wins or 0) / decided, 3) if decided else 0.0,
+                'total_pnl':      round(total_pnl or 0, 2),
+            })
+        out.sort(key=lambda x: -x['sample_size'])
+        return out
 
     def all_stats(self) -> List[dict]:
         """Returns stats for all (symbol, strategy) pairs that have closed trades."""

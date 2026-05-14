@@ -39,6 +39,7 @@ from signals.priority_tape import PriorityTapeReader, PRIORITY_SYMBOLS
 from signals.technical import TechnicalAnalyzer
 from signals.volume_monitor import VolumeMonitor
 from signals.entry_quality import EntryQualityChecker, MIN_QUALITY_TO_TRADE
+from signals import session as session_mod
 from learning.adaptive import AdaptiveLearner
 from strategy.risk_manager import RiskManager
 from strategy.stock_strategy import StockStrategy
@@ -241,8 +242,11 @@ class TradingBot:
         self.orders.close_all()
 
     def _apply_macro_risk(self):
-        """Translate MacroRisk into risk-manager state."""
-        self.risk.macro_risk_multiplier = self.macro_risk.risk_multiplier
+        """Translate MacroRisk + current session window into risk-manager state."""
+        macro_mult = self.macro_risk.risk_multiplier
+        session_mult = session_mod.size_multiplier(session_mod.current_window(et_now()))
+        # Both multipliers compound — risk_manager.max_risk_dollars reads this
+        self.risk.macro_risk_multiplier = macro_mult * session_mult
         halt = ''
         if config.HALT_ON_FOMC_DAY and self.macro_risk.fomc_today:
             halt = 'FOMC announcement today'
@@ -279,6 +283,12 @@ class TradingBot:
         """Return a trade setup dict if symbol has a high-quality signal."""
         if sym in self._traded_today:
             return None
+
+        # Session window — drives score boost/penalty by time of day
+        session_window = session_mod.current_window(et_now())
+        if session_window == 'off_hours':
+            return None
+        session_adj = session_mod.score_adjustment(session_window)
 
         # News & earnings filter — gate BEFORE expensive analysis
         allowed, score_adj, reason = self._news_filter(sym)
@@ -349,27 +359,31 @@ class TradingBot:
                         config.INTEL_SCORE_BOOST_MAX,
                         self.intel.score_boost(sym, 'long' if opt_setup.option_type == 'call' else 'short'),
                     )
-                    opt_setup.score = min(
+                    opt_setup.score = max(0, min(
                         100,
-                        opt_setup.score + priority_boost + score_adj + intel_boost,
-                    )
-                    if score_adj > 0:
-                        opt_setup.notes.append(f'news+{score_adj}')
-                    if priority_boost > 0:
-                        opt_setup.notes.append(f'priority+{priority_boost}')
-                    if intel_boost > 0:
-                        opt_setup.notes.append(f'smartmoney+{intel_boost}')
+                        opt_setup.score + priority_boost + score_adj + intel_boost + session_adj,
+                    ))
+                    if score_adj > 0:    opt_setup.notes.append(f'news+{score_adj}')
+                    if priority_boost:   opt_setup.notes.append(f'priority+{priority_boost}')
+                    if intel_boost:      opt_setup.notes.append(f'smartmoney+{intel_boost}')
+                    if session_adj:      opt_setup.notes.append(f'{session_window}{session_adj:+d}')
 
-                    # Log the options signal for adaptive learning
+                    # Re-check threshold (per-session adaptive adjustment)
+                    strat_name = f'options_{opt_setup.option_type}'
+                    thr_adj = self.adaptive.threshold_adjustment(sym, strat_name, session_window=session_window)
+                    if opt_setup.score < config.MIN_SIGNAL_SCORE + thr_adj:
+                        return None
+
                     self.adaptive.record_signal(
-                        signal_id=f'{sym}-options_{opt_setup.option_type}-{int(opt_setup.timestamp.timestamp())}',
+                        signal_id=f'{sym}-{strat_name}-{int(opt_setup.timestamp.timestamp())}',
                         symbol=sym,
-                        strategy=f'options_{opt_setup.option_type}',
+                        strategy=strat_name,
                         score=opt_setup.score,
                         imbalance=tape_signal.imbalance if tape_signal else 0.0,
                         rvol=tech.rvol if tech else 0.0,
                         confluence_score=priority_sig.confluence_score if priority_sig else 0,
                         direction='long' if opt_setup.option_type == 'call' else 'short',
+                        session_window=session_window,
                     )
                     return {'type': 'option', 'setup': opt_setup, 'tech': tech, 'tape': tape_signal}
 
@@ -389,12 +403,15 @@ class TradingBot:
                 config.INTEL_SCORE_BOOST_MAX,
                 self.intel.score_boost(sym, stock_setup.direction),
             )
-            stock_setup.score = min(100, stock_setup.score + score_adj + priority_boost + intel_boost)
+            stock_setup.score = max(0, min(100,
+                stock_setup.score + score_adj + priority_boost + intel_boost + session_adj,
+            ))
             if score_adj > 0:    stock_setup.notes.append(f'news+{score_adj}')
             if priority_boost:   stock_setup.notes.append(f'priority+{priority_boost}')
             if intel_boost:      stock_setup.notes.append(f'smartmoney+{intel_boost}')
+            if session_adj:      stock_setup.notes.append(f'{session_window}{session_adj:+d}')
 
-            adj = self.adaptive.threshold_adjustment(sym, stock_setup.strategy)
+            adj = self.adaptive.threshold_adjustment(sym, stock_setup.strategy, session_window=session_window)
             if stock_setup.score < config.MIN_SIGNAL_SCORE + adj:
                 return None
 
@@ -407,6 +424,7 @@ class TradingBot:
                 rvol=stock_setup.rvol,
                 confluence_score=priority_sig.confluence_score if priority_sig else 0,
                 direction=stock_setup.direction,
+                session_window=session_window,
             )
             return {'type': 'stock', 'setup': stock_setup, 'tech': tech, 'tape': tape_signal}
 
@@ -515,6 +533,7 @@ class TradingBot:
             self._update_account()
             self._refresh_news_if_due()
             self._refresh_macro_if_due()
+            self._apply_macro_risk()        # refresh session-window multiplier each tick
             self.orders.check_exits(self._live_prices)
             self._check_eod_close()    # honours day-trade-only policy
 
@@ -795,6 +814,8 @@ class TradingBot:
             'priority_tape':   self.priority_tape.snapshot_all(),
             'priority_volume': self.volume.snapshot_all(),
             'adaptive_stats':  self.adaptive.all_stats(),
+            'session':         session_mod.to_dict(et_now()),
+            'session_stats':   self.adaptive.session_stats(),
             'intel':           self.intel.dashboard_data(),
         }
 

@@ -24,7 +24,7 @@ POWER_OPEN_END    = (11, 0)        # first 90 minutes
 MIDDAY_START      = (11, 0)
 MIDDAY_END        = (15, 0)
 POWER_CLOSE_START = (15, 0)        # power hour
-POWER_CLOSE_END   = (15, 50)       # day-trade-only cutoff
+POWER_CLOSE_END   = (15, 55)       # day-trade-only cutoff
 
 
 def current_window(now_et: datetime) -> str:

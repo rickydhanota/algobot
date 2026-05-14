@@ -76,7 +76,7 @@ def market_phase(now: datetime) -> str:
 
 # Day-trade-only policy: force-close all positions before market close
 # so nothing gets held overnight.
-EOD_CLOSE_TIME_ET = (15, 50)   # 3:50 PM Eastern — 10 min before market close
+EOD_CLOSE_TIME_ET = (15, 55)   # 3:55 PM Eastern — 5 min before market close
 
 
 class TradingBot:

@@ -110,6 +110,9 @@ class TradingBot:
         self.intel = IntelAggregator()
 
         self._traded_today: Set[str] = set()
+        # Ring buffer of recent rejections — what didn't quite fire and why
+        from collections import deque as _deque
+        self._rejections = _deque(maxlen=60)
         self._running = False
         self._paused = False                     # set by dashboard /api/pause
         self._force_close_requested = False      # set by dashboard /api/close-all
@@ -279,6 +282,18 @@ class TradingBot:
 
     # ── Signal evaluation ─────────────────────────────────────────────────────
 
+    def _track_rejection(self, symbol: str, category: str, detail: str = '',
+                         score: Optional[int] = None, threshold: Optional[int] = None):
+        """Log a near-miss so we can see what's almost firing on the dashboard."""
+        self._rejections.append({
+            'symbol':    symbol,
+            'category':  category,
+            'detail':    detail,
+            'score':     score,
+            'threshold': threshold,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        })
+
     def _evaluate_symbol(self, sym: str) -> Optional[dict]:
         """Return a trade setup dict if symbol has a high-quality signal."""
         if sym in self._traded_today:
@@ -294,6 +309,7 @@ class TradingBot:
         allowed, score_adj, reason = self._news_filter(sym)
         if not allowed:
             log.debug(f'[{sym}] Skipped: {reason}')
+            self._track_rejection(sym, 'news_filter', reason)
             return None
 
         price = self._live_prices.get(sym)
@@ -328,6 +344,7 @@ class TradingBot:
             ok, why = self.volume.is_tradeable(sym)
             if not ok:
                 log.debug(f'[{sym}] Volume gate: {why}')
+                self._track_rejection(sym, 'volume_gate', why)
                 return None
             volume_state = self.volume.analyze(sym)
             priority_sig = self.priority_tape.analyze(sym)
@@ -371,7 +388,13 @@ class TradingBot:
                     # Re-check threshold (per-session adaptive adjustment)
                     strat_name = f'options_{opt_setup.option_type}'
                     thr_adj = self.adaptive.threshold_adjustment(sym, strat_name, session_window=session_window)
-                    if opt_setup.score < config.MIN_SIGNAL_SCORE + thr_adj:
+                    threshold = config.MIN_SIGNAL_SCORE + thr_adj
+                    if opt_setup.score < threshold:
+                        self._track_rejection(
+                            sym, 'score_below_threshold',
+                            f'{strat_name} {opt_setup.option_type.upper()} ${opt_setup.strike:.0f}',
+                            score=opt_setup.score, threshold=threshold,
+                        )
                         return None
 
                     self.adaptive.record_signal(
@@ -393,6 +416,10 @@ class TradingBot:
                 log.debug(
                     f'[{sym}] Underlying signal valid ({underlying_setup.strategy} '
                     f'score={underlying_setup.score}) but no viable options — skipping (OPTIONS_ONLY)'
+                )
+                self._track_rejection(
+                    sym, 'no_valid_options',
+                    f'underlying {underlying_setup.strategy} score={underlying_setup.score} but no options chain match',
                 )
             return None
 
@@ -469,6 +496,10 @@ class TradingBot:
 
         if not verdict.allowed:
             log.info(f'[{underlying}] Entry rejected: {verdict.reason}')
+            self._track_rejection(
+                underlying, 'entry_quality', verdict.reason,
+                score=verdict.score,
+            )
             return False
 
         if hasattr(setup, 'notes'):
@@ -574,6 +605,12 @@ class TradingBot:
                         self._traded_today.add(sym)
                         # Register underlying so dynamic stop can read its tape
                         self.exit_manager.register_underlying(trade.trade_id, sym)
+                    else:
+                        # Order failed (risk manager, sizing, or broker error)
+                        self._track_rejection(
+                            sym, 'risk_or_order_fail',
+                            f'{setup.option_type.upper()} ${setup.strike:.0f} premium ${setup.premium:.2f}',
+                        )
 
             # Faster loop iteration for snappier trimming/stops
             await asyncio.sleep(5)
@@ -816,6 +853,7 @@ class TradingBot:
             'adaptive_stats':  self.adaptive.all_stats(),
             'session':         session_mod.to_dict(et_now()),
             'session_stats':   self.adaptive.session_stats(),
+            'recent_rejections': list(self._rejections)[-40:][::-1],   # newest first
             'intel':           self.intel.dashboard_data(),
         }
 

@@ -192,6 +192,18 @@
       margin-left: 4px;
     }
 
+    /* Rejection category badges */
+    .rej-cat {
+      display:inline-block; padding:1px 7px; border-radius:3px;
+      font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.4px;
+    }
+    .rej-news_filter        { background:#3a2f1a33; color:#e3b341; border:1px solid #e3b34155; }
+    .rej-volume_gate        { background:#2a1a3a33; color:#bc8cff; border:1px solid #8b5cf655; }
+    .rej-no_valid_options   { background:#21262d;   color:#8b949e; border:1px solid #30363d; }
+    .rej-score_below_threshold { background:#1f3a5f33; color:#58a6ff; border:1px solid #1f6feb55; }
+    .rej-entry_quality      { background:#3a1a1a33; color:#f85149; border:1px solid #f8514955; }
+    .rej-risk_or_order_fail { background:#3a1a1a;   color:#f85149; border:1px solid #f85149; }
+
     /* Per-row close button */
     .btn-close-row {
       background: #2a1a1a;
@@ -672,6 +684,31 @@
     </div>
   </div>
 
+  <!-- Recent Rejections -->
+  <div>
+    <div class="section-header">
+      <span class="section-title">Recent Rejections — What Almost Fired</span>
+      <span class="badge" id="rejection-count">0</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th class="center">Time (PT)</th>
+            <th>Symbol</th>
+            <th>Category</th>
+            <th class="right">Score</th>
+            <th class="right">Needed</th>
+            <th>Why</th>
+          </tr>
+        </thead>
+        <tbody id="rejection-body">
+          <tr class="empty-row"><td colspan="6">No rejections logged yet</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
   <!-- Smart Money + Congress Watch -->
   <div>
     <div class="section-header">
@@ -1032,6 +1069,9 @@
     // Earnings
     renderEarnings(data.earnings || []);
 
+    // Recent rejections — near-misses for learning
+    renderRejections(data.recent_rejections || []);
+
     // ── Open positions
     const openTrades = data.open_positions || [];
     document.getElementById('open-count').textContent = openTrades.length;
@@ -1106,6 +1146,34 @@
     if (n >= 1e6)  return '$' + (n / 1e6).toFixed(1) + 'M';
     if (n >= 1e3)  return '$' + (n / 1e3).toFixed(0) + 'K';
     return '$' + n.toFixed(0);
+  }
+
+  function renderRejections(items) {
+    document.getElementById('rejection-count').textContent = items.length;
+    const body = document.getElementById('rejection-body');
+    if (!items.length) {
+      body.innerHTML = '<tr class="empty-row"><td colspan="6">No rejections logged yet</td></tr>';
+      return;
+    }
+    body.innerHTML = items.map(r => {
+      const t = r.timestamp
+        ? new Date(r.timestamp).toLocaleTimeString('en-US', {
+            timeZone: 'America/Los_Angeles', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+          })
+        : '—';
+      const scoreCell = (r.score != null)
+        ? `<span class="${(r.threshold != null && r.score < r.threshold) ? 'red' : ''}">${r.score}</span>`
+        : '—';
+      const threshCell = (r.threshold != null) ? r.threshold : '—';
+      return `<tr>
+        <td class="center" style="color:#6e7681">${t}</td>
+        <td class="ticker">${r.symbol || '—'}</td>
+        <td><span class="rej-cat rej-${r.category}">${(r.category||'').replace(/_/g,' ')}</span></td>
+        <td class="right">${scoreCell}</td>
+        <td class="right" style="color:#6e7681">${threshCell}</td>
+        <td style="color:#8b949e;font-size:11px;">${(r.detail||'').replace(/</g, '&lt;')}</td>
+      </tr>`;
+    }).join('');
   }
 
   function renderIntel(intel) {

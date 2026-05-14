@@ -826,6 +826,17 @@
 
   function pnlClass(n) { return n >= 0 ? 'green' : 'red'; }
 
+  // OCC option symbol → human-readable ticker + expiration
+  // e.g. PLTR260522C00139000 → "PLTR · 5/22"
+  function displayTicker(trade) {
+    if (!trade) return '—';
+    if (trade.asset_type !== 'option') return trade.symbol || '—';
+    const m = (trade.symbol || '').match(/^([A-Z]+?)(\d{2})(\d{2})(\d{2})[CP]\d{8}$/);
+    if (!m) return trade.symbol;
+    const [, root, _yy, mm, dd] = m;
+    return `${root} <span style="color:#8b949e;font-weight:500;font-size:12px;">· ${parseInt(mm)}/${parseInt(dd)}</span>`;
+  }
+
   function typeCell(t) {
     return t.asset_type === 'option'
       ? '<span class="badge-option">OPTION</span>'
@@ -1095,7 +1106,7 @@
           ? `<button class="btn-close-row" onclick="closeOneTrade('${t.trade_id}', '${t.symbol}', ${totalQty}, '${unit}')">Close</button>`
           : '<span style="color:#6e7681">—</span>';
         return `<tr>
-          <td class="ticker">${t.symbol}${partialBadge}</td>
+          <td class="ticker">${displayTicker(t)}${partialBadge}</td>
           <td class="center">${typeCell(t)}</td>
           <td class="center">${detailCell(t)}</td>
           <td class="right">${qtyDisplay}</td>
@@ -1123,7 +1134,7 @@
           ? '<span class="badge-win">WIN</span>'
           : '<span class="badge-loss">LOSS</span>';
         return `<tr>
-          <td class="ticker">${t.symbol}</td>
+          <td class="ticker">${displayTicker(t)}</td>
           <td class="center">${typeCell(t)}</td>
           <td class="center">${detailCell(t)}</td>
           <td class="right">${qtyCell(t)}</td>

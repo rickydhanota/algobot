@@ -1105,6 +1105,14 @@
         const closeBtn = t.trade_id
           ? `<button class="btn-close-row" onclick="closeOneTrade('${t.trade_id}', '${t.symbol}', ${totalQty}, '${unit}')">Close</button>`
           : '<span style="color:#6e7681">—</span>';
+        // % P&L based on entry price (per contract / per share)
+        const isShort = (t.direction === 'short' || t.direction === 'sell');
+        const entry = parseFloat(t.entry_price || 0);
+        const curr  = parseFloat(t.current_price || entry);
+        const pctPnl = entry > 0
+          ? ((isShort ? (entry - curr) : (curr - entry)) / entry) * 100
+          : 0;
+        const pctStr = (pctPnl >= 0 ? '+' : '') + pctPnl.toFixed(1) + '%';
         return `<tr>
           <td class="ticker">${displayTicker(t)}${partialBadge}</td>
           <td class="center">${typeCell(t)}</td>
@@ -1114,7 +1122,11 @@
           <td class="right">${fmtMoney(t.current_price)}</td>
           <td class="right" style="color:#6e7681">${fmtMoney(t.stop_price)}</td>
           <td class="right" style="color:#6e7681">${fmtMoney(t.target_price)}</td>
-          <td class="right ${pnlClass(upnl)}">${fmtMoney(upnl, true)}${partialPnl !== 0 ? ` <small class="${pnlClass(partialPnl)}">(+${fmtMoney(partialPnl)})</small>` : ''}</td>
+          <td class="right ${pnlClass(upnl)}">
+            ${fmtMoney(upnl, true)}
+            <small style="font-size:11px;font-weight:600;" class="${pnlClass(pctPnl)}">(${pctStr})</small>
+            ${partialPnl !== 0 ? `<br><small class="${pnlClass(partialPnl)}" style="font-size:10px;">banked +${fmtMoney(partialPnl)}</small>` : ''}
+          </td>
           <td class="center">${fmtTime(t.entry_time)}</td>
           <td class="center">${closeBtn}</td>
         </tr>`;
@@ -1133,6 +1145,13 @@
         const badge = rpnl > 0
           ? '<span class="badge-win">WIN</span>'
           : '<span class="badge-loss">LOSS</span>';
+        const isShort = (t.direction === 'short' || t.direction === 'sell');
+        const entry = parseFloat(t.entry_price || 0);
+        const exit_ = parseFloat(t.exit_price || entry);
+        const pctR = entry > 0
+          ? ((isShort ? (entry - exit_) : (exit_ - entry)) / entry) * 100
+          : 0;
+        const pctStr = (pctR >= 0 ? '+' : '') + pctR.toFixed(1) + '%';
         return `<tr>
           <td class="ticker">${displayTicker(t)}</td>
           <td class="center">${typeCell(t)}</td>
@@ -1140,7 +1159,10 @@
           <td class="right">${qtyCell(t)}</td>
           <td class="right">${fmtMoney(t.entry_price)}</td>
           <td class="right">${fmtMoney(t.exit_price)}</td>
-          <td class="right ${pnlClass(rpnl)}">${fmtMoney(rpnl, true)}</td>
+          <td class="right ${pnlClass(rpnl)}">
+            ${fmtMoney(rpnl, true)}
+            <small style="font-size:11px;font-weight:600;" class="${pnlClass(pctR)}">(${pctStr})</small>
+          </td>
           <td class="center">${badge}</td>
           <td class="center">${fmtTime(t.entry_time)}</td>
           <td class="center">${fmtTime(t.exit_time)}</td>

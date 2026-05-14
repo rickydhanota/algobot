@@ -419,7 +419,8 @@ class TradingBot:
                 )
                 self._track_rejection(
                     sym, 'no_valid_options',
-                    f'underlying {underlying_setup.strategy} score={underlying_setup.score} but no options chain match',
+                    (f'underlying {underlying_setup.strategy} ok (stock score {underlying_setup.score}); '
+                     f'no option contract met DTE 7-21 + |Δ| 0.25-0.50 + spread <10% + score ≥{config.MIN_SIGNAL_SCORE}'),
                 )
             return None
 

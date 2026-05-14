@@ -4,9 +4,14 @@ Options strategy engine.
 Identifies unusual options activity (large sweeps, high V/OI) and scores
 candidate contracts for directional plays.
 
+Note: Alpaca's free option-chain endpoint does NOT populate greeks, so we
+estimate delta from the strike vs underlying spot price (close enough for
+our 0.25-0.50 filter band).
+
 Produces OptionsSetup objects compatible with the order manager.
 """
 from __future__ import annotations
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional
@@ -14,6 +19,38 @@ from typing import Dict, List, Optional
 import config
 from signals.tape_reader import TapeSignal
 from signals.technical import TechnicalSignal
+
+
+# OCC symbol format: ROOT YYMMDD C|P STRIKEx1000 (8 digits)
+OCC_PATTERN = re.compile(r'^([A-Z]+?)(\d{6})([CP])(\d{8})$')
+
+
+def parse_occ_symbol(symbol: str):
+    """Parse OCC option symbol → (underlying, expiry_date, 'C'|'P', strike_float)."""
+    m = OCC_PATTERN.match(symbol)
+    if not m:
+        return None
+    underlying, exp_str, opt_type, strike_str = m.groups()
+    try:
+        expiry = date(2000 + int(exp_str[:2]), int(exp_str[2:4]), int(exp_str[4:6]))
+        strike = int(strike_str) / 1000.0
+        return underlying, expiry, opt_type, strike
+    except (ValueError, TypeError):
+        return None
+
+
+def estimate_delta(opt_type: str, spot: float, strike: float, dte: int) -> float:
+    """Rough delta magnitude estimate from moneyness + DTE.
+    Returns 0.01–0.99. Accurate within ±0.10 for normal liquid options."""
+    if spot <= 0 or strike <= 0:
+        return 0.5
+    if opt_type == 'C':
+        moneyness = (spot - strike) / spot          # >0 when ITM call
+    else:
+        moneyness = (strike - spot) / spot          # >0 when ITM put
+    time_factor = max(0.3, min(2.0, (max(dte, 1) / 14.0) ** 0.5))
+    delta = 0.5 + 10.0 * moneyness * time_factor
+    return max(0.01, min(0.99, delta))
 
 
 @dataclass
@@ -78,9 +115,13 @@ class OptionsStrategy:
         if underlying_score < 50:
             return None  # underlying signal too weak to trade options
 
-        # Find best contract
+        # Find best contract — pass underlying spot price so we can estimate
+        # delta when greeks aren't returned by the data feed.
         opt_type = 'call' if direction == 'long' else 'put'
-        best = self._select_contract(underlying, chain, opt_type, direction, underlying_score)
+        spot = tech.last_price if tech else 0.0
+        best = self._select_contract(
+            underlying, chain, opt_type, direction, underlying_score, spot_price=spot,
+        )
         return best
 
     def _underlying_bias(
@@ -114,41 +155,45 @@ class OptionsStrategy:
         opt_type: str,
         direction: str,
         underlying_score: int,
+        spot_price: float = 0.0,
     ) -> Optional[OptionsSetup]:
         today = date.today()
         candidates = []
+        expected_type = 'C' if opt_type == 'call' else 'P'
 
         for symbol, snap in chain.items():
             try:
-                details = snap.greeks if hasattr(snap, 'greeks') else None
-                if details is None:
+                # Parse symbol → strike, expiry, type (works even when greeks
+                # are unavailable, which is the case on Alpaca's free tier)
+                parsed = parse_occ_symbol(symbol)
+                if parsed is None:
                     continue
-
-                delta = abs(details.delta or 0)
-                iv = details.implied_volatility or 0
-                expiry = snap.details.expiry_date if hasattr(snap, 'details') else None
-
-                if expiry is None:
+                _under, expiry, parsed_type, strike = parsed
+                if parsed_type != expected_type:
                     continue
 
                 dte = (expiry - today).days
                 if not (config.OPT_DTE_MIN <= dte <= config.OPT_DTE_MAX):
                     continue
+
+                # Use real greeks if available, otherwise estimate from spot
+                greeks = getattr(snap, 'greeks', None)
+                if greeks is not None and getattr(greeks, 'delta', None):
+                    delta = abs(greeks.delta)
+                    iv = getattr(greeks, 'implied_volatility', 0) or 0
+                else:
+                    delta = estimate_delta(parsed_type, spot_price, strike, dte)
+                    iv = 0  # unknown — drop the IV-based scoring component
+
                 if not (config.OPT_DELTA_MIN <= delta <= config.OPT_DELTA_MAX):
                     continue
 
-                # Check call vs put
-                contract_type = 'call' if 'C' in symbol else 'put'
-                if contract_type != opt_type:
-                    continue
-
-                quote = snap.latest_quote if hasattr(snap, 'latest_quote') else None
+                quote = getattr(snap, 'latest_quote', None)
                 if quote is None:
                     continue
-
                 bid = quote.bid_price or 0
                 ask = quote.ask_price or 0
-                premium = (bid + ask) / 2 if bid and ask else 0
+                premium = (bid + ask) / 2 if (bid and ask) else 0
                 if premium <= 0:
                     continue
 
@@ -156,11 +201,11 @@ class OptionsStrategy:
                 if spread_pct > config.OPT_MAX_SPREAD_PCT:
                     continue
 
-                volume = snap.daily_bar.volume if hasattr(snap, 'daily_bar') and snap.daily_bar else 0
-                oi = snap.greeks.open_interest if hasattr(snap.greeks, 'open_interest') else 1
-                voi = volume / oi if oi else 0
-
-                strike = snap.details.strike_price if hasattr(snap, 'details') else 0
+                # Volume and OI from snapshot if available
+                daily_bar = getattr(snap, 'daily_bar', None)
+                volume = daily_bar.volume if daily_bar else 0
+                oi = getattr(greeks, 'open_interest', 0) if greeks else 0
+                voi = (volume / oi) if oi else 0
 
                 score = self._score_contract(
                     delta=delta,

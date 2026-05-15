@@ -9,9 +9,10 @@ PAPER_TRADING = os.getenv('PAPER_TRADING', 'true').lower() == 'true'
 
 # ── Capital & Risk ────────────────────────────────────────────────────────────
 ACCOUNT_SIZE = 3000.0
-MAX_RISK_PER_TRADE_PCT = 0.02     # 2% per trade = $60 on $3k
-MAX_DAILY_LOSS_PCT = 0.05         # stop trading after 5% down = $150
-MAX_CONCURRENT_POSITIONS = 5
+MAX_RISK_PER_TRADE_PCT = 0.01     # 1% per trade — caps investment per position
+MAX_DAILY_LOSS_PCT = 0.02         # 2% daily circuit breaker — halts trading
+MAX_CONCURRENT_POSITIONS = 3      # cap correlated downside
+MAX_DRAWDOWN_FROM_PEAK_PCT = 0.03 # 3% drawdown from session high — full halt
 MIN_SIGNAL_SCORE = 75             # raised from 68 — today's losers scored 69-77
 
 # Hard gates — apply BEFORE scoring, not just as score boosts

@@ -28,6 +28,7 @@ class SizeResult:
 class RiskManager:
     def __init__(self, account_size: float = config.ACCOUNT_SIZE):
         self.account_size = account_size
+        self.session_peak_equity: float = account_size  # tracks high-water mark
         self.daily_pnl: float = 0.0
         self.open_positions: int = 0
         self.macro_risk_multiplier: float = 1.0   # set by macro analysis
@@ -35,6 +36,9 @@ class RiskManager:
 
     def update_account(self, equity: float):
         self.account_size = equity
+        # Track session high-water mark for drawdown circuit breaker
+        if equity > self.session_peak_equity:
+            self.session_peak_equity = equity
 
     def record_daily_pnl(self, pnl: float):
         self.daily_pnl += pnl
@@ -59,6 +63,11 @@ class RiskManager:
             return False, f'Macro halt: {self.macro_halt_reason}'
         if self.daily_pnl <= -self.daily_loss_limit:
             return False, f'Daily loss limit hit ({self.daily_pnl:.2f})'
+        # Drawdown-from-peak circuit breaker: never let losses run away
+        max_dd = getattr(config, 'MAX_DRAWDOWN_FROM_PEAK_PCT', 0.03)
+        dd = (self.session_peak_equity - self.account_size) / self.session_peak_equity if self.session_peak_equity else 0
+        if dd >= max_dd:
+            return False, f'Drawdown {dd*100:.1f}% from peak (cap {max_dd*100:.1f}%)'
         if self.open_positions >= config.MAX_CONCURRENT_POSITIONS:
             return False, f'Max positions ({config.MAX_CONCURRENT_POSITIONS}) reached'
         return True, ''

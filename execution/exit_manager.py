@@ -41,16 +41,16 @@ TRIM_TIERS = [
     # remaining 0.01 = moon runner
 ]
 
-SOFT_STOP_PCT = -0.15           # "watch zone" — hold by default, exit only on negative evidence
-HARD_STOP_PCT = -0.40           # catastrophic backstop — always exit
-TAPE_FLIP_THRESHOLD = 0.40      # opposite-direction imbalance triggers exit
-TAPE_AGAINST_CONF_MIN = 40      # at soft stop, tape confluence ≥ this against us = exit
-TAPE_AGAINST_IMBALANCE_MIN = 0.30
+SOFT_STOP_PCT = -0.10           # tightened from -0.15 — watch zone shrinks
+HARD_STOP_PCT = -0.25           # tightened from -0.40 — cap maximum loss faster
+TAPE_FLIP_THRESHOLD = 0.30      # tightened from 0.40 — exit on weaker reversals
+TAPE_AGAINST_CONF_MIN = 35      # tightened from 40 — exit on smaller adverse moves
+TAPE_AGAINST_IMBALANCE_MIN = 0.25
 
 # "Thesis broken" check — covers the gap between -15% soft stop and +20% tier 1
 # where no other exit logic operates. Closes the trade when the conditions
 # that justified entry have evaporated.
-THESIS_PNL_LOW  = -0.15             # only fires inside this band...
+THESIS_PNL_LOW  = -0.10             # aligned with tightened soft stop
 THESIS_PNL_HIGH = 0.20              # ...where no other exit logic operates
 THESIS_VOL_RATE_MAX = 0.50          # volume must be < 0.5× normal
 THESIS_SUSTAINED_SECONDS = 60       # ...continuously for 60s before exit fires

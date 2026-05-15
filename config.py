@@ -19,7 +19,7 @@ REQUIRE_TAPE_ALIGNMENT = True     # signal direction MUST match underlying tape 
 REQUIRE_VOLUME_HEALTHY = True     # volume rate must be ≥ 0.8× for all symbols
 VOLUME_HEALTHY_FLOOR = 0.8
 BLOCK_MIDDAY_ENTRIES = True       # no new trades during midday window — 71% neutral today
-LATE_ENTRY_CUTOFF_ET = (15, 30)   # no new trades after 3:30 PM ET — need time for exits
+LATE_ENTRY_CUTOFF_ET = (15, 50)   # no new trades after 12:50 PT (5 min before force-close)
 
 # ── Session timing (all Eastern) ─────────────────────────────────────────────
 ORB_CAPTURE_MINUTES = 15          # capture open range first 15 min

@@ -117,17 +117,30 @@ class RiskManager:
         self,
         premium: float,
         contracts: int = 1,
+        score: int = 75,
     ) -> tuple[int, bool, str]:
         """
         For options we risk the entire premium paid.
-        Returns (contracts, valid, reason).
+        Confidence-weighted: higher signal scores get larger budget.
+
+          Score 75-79: 0.7× base budget (cautious — marginal pass)
+          Score 80-84: 1.0× base
+          Score 85-89: 1.3× base
+          Score 90+:   1.5× base (high conviction)
         """
         allowed, reason = self.is_trading_allowed()
         if not allowed:
             return 0, False, reason
 
+        # Confidence multiplier on the per-trade budget
+        if   score >= 90: conf_mult = 1.5
+        elif score >= 85: conf_mult = 1.3
+        elif score >= 80: conf_mult = 1.0
+        elif score >= 75: conf_mult = 0.7
+        else:             conf_mult = 0.5     # below threshold — minimal size
+
         cost_per_contract = premium * 100
-        max_risk = self.max_risk_dollars
+        max_risk = self.max_risk_dollars * conf_mult
         max_contracts = int(max_risk / cost_per_contract) if cost_per_contract > 0 else 0
 
         if max_contracts <= 0:

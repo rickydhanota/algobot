@@ -138,7 +138,9 @@ class OrderManager:
     # ── Options orders ────────────────────────────────────────────────────────
 
     def place_options_trade(self, setup: OptionsSetup) -> Optional[ActiveTrade]:
-        contracts, valid, reason = self.risk.size_options_trade(setup.premium)
+        contracts, valid, reason = self.risk.size_options_trade(
+            setup.premium, score=getattr(setup, 'score', 75),
+        )
         if not valid:
             log.warning(f'[{setup.underlying}] Options sizing rejected: {reason}')
             return None

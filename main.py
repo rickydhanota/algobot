@@ -387,28 +387,54 @@ class TradingBot:
             halt = 'major geopolitical event'
         self.risk.macro_halt_reason = halt
 
-    def _news_filter(self, symbol: str) -> tuple[bool, int, str]:
+    def _news_filter(self, symbol: str) -> tuple[bool, float, str]:
         """
-        Apply news/earnings filter.
-        Returns: (allowed, score_adjustment, reason)
+        Pre-direction filter — earnings only.
+
+        Sentiment check is now direction-aware and runs AFTER the options
+        strategy decides call vs put (see _news_direction_check below).
+        That way, negative news on SPY favors a PUT trade rather than
+        blocking the symbol entirely.
+
+        Returns: (allowed, sentiment_score, reason)
         """
-        # Earnings circuit breaker
+        # Earnings circuit breaker — direction-agnostic
         if self.earnings.has_earnings_within(symbol, days=config.SKIP_EARNINGS_DAYS):
             days = self.earnings.days_until_earnings(symbol) or 0
-            return False, 0, f'earnings in {days}d'
+            return False, 0.0, f'earnings in {days}d'
 
-        # News sentiment
         sent = self._sentiment_cache.get(symbol, {})
-        score = sent.get('score', 0.0)
-        adjustment = 0
+        score = float(sent.get('score', 0.0))
+        return True, score, ''
 
-        if score <= config.NEWS_NEGATIVE_THRESHOLD:
-            return False, 0, f'negative news ({score:+.2f})'
+    def _news_direction_check(self, sentiment: float, direction: str) -> tuple[bool, int, str]:
+        """
+        Direction-aware sentiment check.
 
-        if score >= config.NEWS_POSITIVE_BOOST:
-            adjustment = config.NEWS_SCORE_BONUS
+          CALL/long  + strongly negative news → BLOCK (fundamentals against)
+          CALL/long  + strongly positive news → ALLOW + score bonus
+          PUT/short  + strongly negative news → ALLOW + score bonus (aligned)
+          PUT/short  + strongly positive news → BLOCK
+          neutral sentiment (between thresholds) → ALLOW, no adjustment
 
-        return True, adjustment, ''
+        Returns: (allowed, score_adjustment, reason)
+        """
+        is_long  = direction in ('long', 'buy', 'call')
+        is_short = direction in ('short', 'sell', 'put')
+
+        if sentiment <= config.NEWS_NEGATIVE_THRESHOLD:
+            if is_long:
+                return False, 0, f'negative news ({sentiment:+.2f}) blocks CALL'
+            if is_short:
+                return True, config.NEWS_SCORE_BONUS, f'bearish news aligned with PUT ({sentiment:+.2f})'
+
+        if sentiment >= config.NEWS_POSITIVE_BOOST:
+            if is_short:
+                return False, 0, f'positive news ({sentiment:+.2f}) blocks PUT'
+            if is_long:
+                return True, config.NEWS_SCORE_BONUS, f'bullish news aligned with CALL ({sentiment:+.2f})'
+
+        return True, 0, ''
 
     # ── Signal evaluation ─────────────────────────────────────────────────────
 
@@ -458,11 +484,13 @@ class TradingBot:
                 return None
 
         # News & earnings filter — gate BEFORE expensive analysis
-        allowed, score_adj, reason = self._news_filter(sym)
+        # Pre-direction news check (earnings only — sentiment evaluated after direction is known)
+        allowed, sentiment_score, reason = self._news_filter(sym)
         if not allowed:
             log.debug(f'[{sym}] Skipped: {reason}')
             self._track_rejection(sym, 'news_filter', reason)
             return None
+        score_adj = 0  # populated after direction is determined
 
         price = self._live_prices.get(sym)
         if not price:
@@ -560,10 +588,23 @@ class TradingBot:
                         )
                         opt_setup = None
                 if opt_setup and opt_setup.is_valid:
+                    # Direction-aware news check — negative news favors PUT, blocks CALL
+                    opt_dir = 'long' if opt_setup.option_type == 'call' else 'short'
+                    news_ok, news_adj, news_reason = self._news_direction_check(
+                        sentiment_score, opt_dir,
+                    )
+                    if not news_ok:
+                        self._track_rejection(
+                            sym, 'news_conflicts_direction',
+                            news_reason,
+                        )
+                        return None
+                    score_adj = news_adj   # apply direction-aligned bonus
+
                     # Stack all bonuses on options score
                     intel_boost = min(
                         config.INTEL_SCORE_BOOST_MAX,
-                        self.intel.score_boost(sym, 'long' if opt_setup.option_type == 'call' else 'short'),
+                        self.intel.score_boost(sym, opt_dir),
                     )
                     opt_setup.score = max(0, min(
                         100,
@@ -623,6 +664,14 @@ class TradingBot:
         # ── FALLBACK PATH: stock trade (only when OPTIONS_ONLY_MODE = False) ─
         if underlying_setup:
             stock_setup = underlying_setup
+            # Direction-aware news check for stocks too
+            news_ok, news_adj, news_reason = self._news_direction_check(
+                sentiment_score, stock_setup.direction,
+            )
+            if not news_ok:
+                self._track_rejection(sym, 'news_conflicts_direction', news_reason)
+                return None
+            score_adj = news_adj
             intel_boost = min(
                 config.INTEL_SCORE_BOOST_MAX,
                 self.intel.score_boost(sym, stock_setup.direction),

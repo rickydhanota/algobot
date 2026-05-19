@@ -41,7 +41,7 @@ def score_adjustment(window: str) -> int:
     return {
         'power_open':  +5,
         'power_close': +5,
-        'midday':      -7,    # require markedly better setup at midday
+        'midday':      -10,   # tightened from -7 — only A+ setups pass midday now
         'off_hours':   0,
     }.get(window, 0)
 
@@ -51,7 +51,7 @@ def size_multiplier(window: str) -> float:
     return {
         'power_open':  1.20,   # larger in high-volume window
         'power_close': 1.20,
-        'midday':      0.70,   # smaller when liquidity is thin
+        'midday':      0.50,   # tightened from 0.7 — midday allowed but half-size
         'off_hours':   0.0,    # no trading
     }.get(window, 1.0)
 

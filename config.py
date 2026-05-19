@@ -19,7 +19,7 @@ MIN_SIGNAL_SCORE = 75             # raised from 68 — today's losers scored 69-
 REQUIRE_TAPE_ALIGNMENT = True     # signal direction MUST match underlying tape direction
 REQUIRE_VOLUME_HEALTHY = True     # volume rate must be ≥ 0.8× for all symbols
 VOLUME_HEALTHY_FLOOR = 0.6     # lowered from 0.8 — Friday volumes too low to clear
-BLOCK_MIDDAY_ENTRIES = True       # no new trades during midday window — 71% neutral today
+BLOCK_MIDDAY_ENTRIES = False      # midday entries ALLOWED but with tighter score/size gates
 LATE_ENTRY_CUTOFF_ET = (15, 50)   # no new trades after 12:50 PT (5 min before force-close)
 
 # ── Session timing (all Eastern) ─────────────────────────────────────────────

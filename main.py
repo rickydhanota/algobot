@@ -545,6 +545,10 @@ class TradingBot:
         # This determines whether the options play is bullish or bearish and
         # gives us a quality score for the underlying move.
         underlying_setup = self.stock_strategy.evaluate(tech, tape_signal)
+        # #4: log silent failure — stock strategy found no setup
+        if underlying_setup is None:
+            self._track_rejection(sym, 'no_underlying_signal',
+                                  'stock_strategy.evaluate returned None')
 
         # SHADOW LEARNING: record this signal regardless of whether it leads
         # to a real trade. We'll evaluate the outcome 30 min later from the
@@ -575,6 +579,18 @@ class TradingBot:
                     sym, chain, tech, tape_signal,
                     dte_min=dte_min, dte_max=dte_max,
                 )
+
+                # #4: log silent failure — chain exists but no contract met criteria
+                if opt_setup is None:
+                    self._track_rejection(
+                        sym, 'no_option_contract',
+                        f'no contract in DTE[{dte_min},{dte_max}] delta[0.25,0.50] spread<10%',
+                    )
+                elif not opt_setup.is_valid:
+                    self._track_rejection(
+                        sym, 'invalid_option_contract',
+                        f'is_valid=False — score={opt_setup.score} spread={opt_setup.spread_pct*100:.1f}%',
+                    )
 
                 # Hard gate: tape direction MUST match the option's direction.
                 # Trade WITH the tape, never against it.
@@ -619,6 +635,12 @@ class TradingBot:
                     strat_name = f'options_{opt_setup.option_type}'
                     thr_adj = self.adaptive.threshold_adjustment(sym, strat_name, session_window=session_window)
                     threshold = config.MIN_SIGNAL_SCORE + thr_adj
+                    # #2: confluence-priority threshold relaxation.
+                    # SPY/SPX/TSLA with very strong tape (conf ≥75) get a lower
+                    # min-score floor — high-conviction tape is itself the signal.
+                    if (sym in PRIORITY_SYMBOLS and priority_sig
+                            and priority_sig.confluence_score >= 75):
+                        threshold = max(65, threshold - 10)
                     if opt_setup.score < threshold:
                         self._track_rejection(
                             sym, 'score_below_threshold',

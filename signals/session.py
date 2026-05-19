@@ -41,7 +41,7 @@ def score_adjustment(window: str) -> int:
     return {
         'power_open':  +5,
         'power_close': +5,
-        'midday':      -10,   # tightened from -7 — only A+ setups pass midday now
+        'midday':      -5,    # loosened from -10 — let solid setups (score 80+) fire midday
         'off_hours':   0,
     }.get(window, 0)
 
